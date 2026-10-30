@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Endfield DMG Calculator</title>
+  <meta name="description" content="Free Arknights: Endfield damage calculator. Data auto-ingested from public game-table dumps.">
+  <link rel="stylesheet" href="./src/style.css">
+</head>
+<body>
+  <header id="top">
+    <h1>Endfield <span class="accent">DMG Calculator</span></h1>
+    <div id="dataBadge" class="badge">loading data…</div>
+  </header>
+
+  <main>
+    <aside id="controls" aria-label="Build controls"></aside>
+    <section id="results" aria-label="Damage results"></section>
+  </main>
+
+  <footer>
+    <p>
+      Game data: <a href="https://github.com/rmxlinux/EndfieldData">rmxlinux/EndfieldData</a>
+      · Damage model: <a href="https://github.com/Taksumii/Arknights-Endfield-DPS-Calc">Taksumii/Arknights-Endfield-DPS-Calc (MIT)</a>
+      · All game content is © Hypergryph. Non-commercial fan tool; no affiliation.
+    </p>
+  </footer>
+
+  <script type="module" src="./src/main.mjs"></script>
+</body>
+</html>

@@ -1,0 +1,78 @@
+# Auto-refresh the game data (rmxlinux/EndfieldData) and deploy the static
+# site to GitHub Pages.
+#
+# Runs:
+#   - every 6 hours (cron) — re-fetches upstream HEAD; if the dump moved,
+#     rebuilds + redeploys, and pushes the refreshed data bundles back to
+#     this repo so `data/` always mirrors the latest upstream commit
+#   - on push to main (code changes) — rebuild + redeploy
+#   - manually via the Actions tab (workflow_dispatch)
+name: deploy
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ github.event.repository.homepage }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # so the refreshed-data commit can push
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Fetch upstream tables (no-op if unchanged)
+        run: node tools/fetchData.mjs
+
+      - name: Normalize tables -> data bundles
+        run: node tools/normalize.mjs
+
+      - name: Run engine tests
+        run: npm test
+
+      - name: Build static site
+        run: npm run build
+
+      - name: Commit refreshed data (only when the dump changed)
+        run: |
+          git config user.name "endfield-data-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain data)" ]; then
+            git add data
+            git commit -m "data: refresh from rmxlinux/EndfieldData"
+            git push
+          else
+            echo "data unchanged"
+          fi
+
+      - uses: actions/configure-pages@v4
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

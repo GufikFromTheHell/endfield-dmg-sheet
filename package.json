@@ -1,0 +1,23 @@
+{
+  "name": "endfield-dmg-sheet",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Truly free Arknights: Endfield DMG calculator. Data auto-ingested from rmxlinux/EndfieldData (game table dump). Formula per Taksumii/Arknights-Endfield-DPS-Calc (MIT).",
+  "type": "module",
+  "scripts": {
+    "fetch-data": "node tools/fetchData.mjs",
+    "normalize": "node tools/fetchData.mjs && node tools/normalize.mjs",
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "dev": "vite --port 5173",
+    "build": "vite build && node tools/copyData.mjs",
+    "preview": "vite preview --port 4173",
+    "serve": "npx --yes http-server . -p 8080 -c-1"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "vite": "^8.3.5"
+  }
+}
