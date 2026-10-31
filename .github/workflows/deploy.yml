@@ -18,7 +18,6 @@ on:
 
 permissions:
   contents: write
-  admin: write # needed once, so configure-pages can CREATE the Pages site
   pages: write
   id-token: write
 
@@ -69,9 +68,11 @@ jobs:
             echo "data unchanged"
           fi
 
+      # The Pages site must be enabled once (Settings -> Pages -> Build and
+      # deployment -> Source: GitHub Actions). It was created once via the
+      # REST API on 2026-10-31; GITHUB_TOKEN can deploy to it but cannot
+      # create it, so no enablement handling happens here.
       - uses: actions/configure-pages@v4
-        with:
-          enablement: true # enable the Pages site (build source: GitHub Actions) if not set yet
 
       - uses: actions/upload-pages-artifact@v3
         with:
