@@ -69,6 +69,8 @@ jobs:
           fi
 
       - uses: actions/configure-pages@v4
+        with:
+          enablement: true # enable the Pages site (build source: GitHub Actions) if not set yet
 
       - uses: actions/upload-pages-artifact@v3
         with:
