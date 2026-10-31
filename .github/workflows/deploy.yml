@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: write
+  admin: write # needed once, so configure-pages can CREATE the Pages site
   pages: write
   id-token: write
 
