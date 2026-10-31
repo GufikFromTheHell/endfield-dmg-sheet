@@ -341,6 +341,146 @@ function numInput(id, label, value, step, tip) {
   return { el: inp, wrap: d };
 }
 
+// Searchable combobox: a text input that filters a dropdown of items while
+// keeping the classic "pick from a list" behavior — you can browse the full
+// list (grouped, with lock markers) or just start typing to search it.
+// o = { label, tip, items: [{value, text, group?, minLv?}], selected, onChange }
+// Returns { wrap, updateLocks() }; the widget owns its open/active state.
+function combo(o) {
+  const d = el('div', 'ctl');
+  const l = el('label', null, o.label);
+  if (o.tip) l.title = o.tip;
+  d.appendChild(l);
+  const box = el('div', 'combo');
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.className = 'combo-input';
+  inp.autocomplete = 'off';
+  inp.spellcheck = false;
+  inp.placeholder = o.placeholder || '';
+  const list = el('div', 'combo-list');
+  box.appendChild(inp);
+  box.appendChild(list);
+  d.appendChild(box);
+
+  const byValue = new Map(o.items.map((it) => [it.value, it]));
+  const textOf = (v) => (byValue.has(v) ? byValue.get(v).text : '');
+  inp.value = textOf(o.selected); // show the current selection right away
+  let open = false, active = -1, itemEls = [];
+
+  const firstEnabled = () => {
+    const i = itemEls.findIndex((b) => !b.classList.contains('disabled'));
+    return i < 0 ? -1 : i;
+  };
+  const markActive = () => {
+    itemEls.forEach((b, i) => b.classList.toggle('active', i === active));
+  };
+
+  function renderList(filter) {
+    list.innerHTML = '';
+    itemEls = [];
+    const f = (filter || '').trim().toLowerCase();
+    let lastGroup = null;
+    for (const it of o.items) {
+      if (f && !it.text.toLowerCase().includes(f)) continue;
+      if (it.group && it.group !== lastGroup) {
+        list.appendChild(el('div', 'combo-grp', it.group));
+        lastGroup = it.group;
+      }
+      const b = el('button', 'combo-item', it.text);
+      b.type = 'button';
+      b.dataset.value = it.value;
+      const locked = it.minLv != null && +it.minLv > state.opLv;
+      if (locked) b.title = `Locked — needs operator Lv ${it.minLv}`;
+      b.classList.toggle('disabled', locked);
+      if (it.value === o.selected) b.classList.add('selected');
+      b.addEventListener('mousedown', (e) => {
+        e.preventDefault(); // keep focus in the input, no blur race
+        if (b.classList.contains('disabled')) return;
+        choose(b.dataset.value);
+      });
+      list.appendChild(b);
+      itemEls.push(b);
+    }
+    if (!itemEls.length) list.appendChild(el('div', 'combo-empty', 'No matches — try fewer letters.'));
+  }
+
+  function choose(v) {
+    o.selected = v;
+    inp.value = textOf(v);
+    itemEls.forEach((b) => b.classList.toggle('selected', b.dataset.value === v));
+    close();
+    if (o.onChange) o.onChange(v);
+  }
+
+  function close() {
+    if (!open) return;
+    open = false;
+    box.classList.remove('open');
+    inp.value = textOf(o.selected); // cancel any in-progress filter text
+    active = -1;
+  }
+
+  function doOpen() {
+    if (open) return;
+    open = true;
+    box.classList.add('open');
+    renderList('');
+    const selIdx = itemEls.findIndex((b) => b.dataset.value === o.selected);
+    active = (selIdx >= 0 && !itemEls[selIdx].classList.contains('disabled')) ? selIdx : firstEnabled();
+    markActive();
+    inp.select(); // typing replaces the selection instead of inserting mid-word
+  }
+
+  inp.addEventListener('focus', doOpen);
+  inp.addEventListener('input', () => {
+    if (!open) doOpen();
+    renderList(inp.value);
+    active = firstEnabled();
+    markActive();
+  });
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!open) { doOpen(); return; }
+      const dir = e.key === 'ArrowDown' ? 1 : -1;
+      if (!itemEls.length) return;
+      let i = active;
+      for (let n = 0; n < itemEls.length; n++) {
+        i = (i + dir + itemEls.length * 2) % itemEls.length;
+        if (!itemEls[i].classList.contains('disabled')) { active = i; markActive(); break; }
+      }
+      if (active >= 0) itemEls[active].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+      if (open && itemEls[active] && !itemEls[active].classList.contains('disabled')) {
+        e.preventDefault();
+        choose(itemEls[active].dataset.value);
+      }
+    } else if (e.key === 'Escape') {
+      close();
+      inp.blur();
+    }
+  });
+  inp.addEventListener('blur', () => close());
+
+  // re-evaluate min-Lv lock markers in place (called on operator-level change
+  // while the list may be open — the widget itself is not rebuilt)
+  function updateLocks() {
+    for (const b of list.querySelectorAll('.combo-item')) {
+      const it = byValue.get(b.dataset.value);
+      const locked = it && it.minLv != null && +it.minLv > state.opLv;
+      b.classList.toggle('disabled', locked);
+      if (locked) b.title = `Locked — needs operator Lv ${it.minLv}`;
+      else b.removeAttribute('title');
+    }
+  }
+
+  return { wrap: d, input: inp, updateLocks };
+}
+
+// gear-slot comboboxes (rebuilt on every renderControls; used by updateGearLocks)
+const gearCombos = {};
+
 // attribute names for potential tier lines
 const POT_ATTR_NAMES = { 39: 'Strength', 40: 'Agility', 41: 'Intellect', 42: 'Will' };
 
@@ -364,18 +504,11 @@ function renderPotInfo() {
   });
 }
 
-// re-evaluates gear option locks in place; renderControls() must not be used
+// re-evaluates gear item locks in place; renderControls() must not be used
 // here — rebuilding while the level slider is being dragged would kill the
 // slider under the cursor (the old drag bug)
 function updateGearLocks() {
-  for (const slot of SLOTS) {
-    const sel = $(`slot_${slot.key}`);
-    if (!sel) continue;
-    for (const o of sel.options) {
-      if (!o.value || o.dataset.minlv == null) continue;
-      o.disabled = +o.dataset.minlv > state.opLv;
-    }
-  }
+  for (const k of Object.keys(gearCombos)) gearCombos[k].updateLocks();
 }
 
 function renderControls() {
@@ -386,24 +519,29 @@ function renderControls() {
   const oc = el('div', 'card');
   oc.appendChild(el('h2', null, 'Operator'));
 
-  const opSel = el('select');
-  opSel.id = 'opSel';
   const byProf = {};
   for (const op of DATA.operators) {
     (byProf[op.professionName || 'Other'] ||= []).push(op);
   }
+  const opItems = [];
   for (const prof of Object.keys(byProf).sort()) {
-    const og = el('optgroup');
-    og.label = prof;
     for (const op of byProf[prof].sort((a, b) => a.name.localeCompare(b.name))) {
-      const o = el('option', null, op.name);
-      o.value = op.id;
-      o.selected = op.id === state.opId;
-      og.appendChild(o);
+      opItems.push({ value: op.id, text: op.name, group: prof });
     }
-    opSel.appendChild(og);
   }
-  oc.appendChild(ctlRow('Operator', opSel, 'Pick the operator to calculate'));
+  oc.appendChild(combo({
+    label: 'Operator',
+    tip: 'Pick the operator to calculate — start typing to search by name.',
+    items: opItems,
+    selected: state.opId,
+    onChange: (v) => {
+      state.opId = v;
+      const op = operatorById(v);
+      if (op && op.defaultWeapon) state.weaponId = op.defaultWeapon;
+      renderControls();
+      re();
+    },
+  }).wrap);
 
   const opLv = range('opLv', 'Level', 1, 90, state.opLv,
     'Operator level (1–90, in-game max). Base ATK and main/sub attributes scale with it; ' +
@@ -446,31 +584,30 @@ function renderControls() {
   const wc = el('div', 'card');
   wc.appendChild(el('h2', null, 'Weapon'));
 
-  const wSel = el('select');
-  wSel.id = 'weaponSel';
   // empty state.weaponId means "the operator's default weapon"
   const effWeaponId = state.weaponId || operatorById(state.opId)?.defaultWeapon || '';
-  // all weapons, grouped by weapon type (rarity is shown per option, so the
+  // all weapons, grouped by weapon type (rarity is shown per item, so the
   // old per-rarity groups were replaced by type groups)
   const byType = {};
   for (const w of DATA.weapons.weapons) {
     (byType[w.typeName || 'Other'] ||= []).push(w);
   }
+  const wItems = [];
   for (const tn of Object.keys(byType).sort()) {
-    const og = el('optgroup');
-    og.label = tn;
     for (const w of byType[tn].sort((a, b) =>
       (b.rarity || 0) - (a.rarity || 0) || a.name.localeCompare(b.name))) {
       const tag = w.origin === 'bp' ? ' [BP]' : w.origin === 'sig' ? ' [SIG]' : '';
-      const o = el('option', null, `${'★'.repeat(w.rarity || 0)} ${w.name}${tag}`);
-      o.value = w.id;
-      o.selected = w.id === effWeaponId;
-      og.appendChild(o);
+      wItems.push({ value: w.id, text: `${'★'.repeat(w.rarity || 0)} ${w.name}${tag}`, group: tn });
     }
-    wSel.appendChild(og);
   }
-  wc.appendChild(ctlRow('Weapon', wSel,
-    'Weapon, all of them, grouped by type. ★ = rarity; [BP] = battle-pass weapon, [SIG] = signature (paid gacha) weapon.'));
+  wc.appendChild(combo({
+    label: 'Weapon',
+    tip: 'All weapons, grouped by type — start typing to search by name. ★ = rarity; ' +
+      '[BP] = battle-pass weapon, [SIG] = signature (paid gacha) weapon.',
+    items: wItems,
+    selected: effWeaponId,
+    onChange: (v) => { state.weaponId = v; renderControls(); re(); },
+  }).wrap);
 
   wc.appendChild(range('weaponLv', 'Weapon level', 1, 90, state.weaponLv,
     'Weapon upgrade level (1–90). Raises weapon ATK.').wrap);
@@ -493,14 +630,6 @@ function renderControls() {
   gc.appendChild(el('h2', null, 'Gear (armor)'));
 
   for (const slot of SLOTS) {
-    const sel = el('select');
-    sel.id = `slot_${slot.key}`;
-    const none = el('option', null, '— none —');
-    none.value = '';
-    sel.appendChild(none);
-    const cur = state.gear[slot.key];
-    if (!cur) none.selected = true;
-
     // group pieces by suit
     const items = Object.values(DATA.equipment.items)
       .filter((x) => x.slot === slot.partType)
@@ -511,32 +640,31 @@ function renderControls() {
         if (a.tier !== b.tier) return b.tier - a.tier;
         return String(a.name).localeCompare(String(b.name));
       });
-    let lastGroup = null;
+    const cur = state.gear[slot.key];
+    const gItems = [{ value: '', text: '— none —' }];
     for (const it of items) {
-      const group = it.suit ? (DATA.equipment.suits[it.suit]?.name || it.suit) : 'Generic (no set)';
-      if (group !== lastGroup) {
-        gcSlotOptgroup(sel, group);
-        lastGroup = group;
-      }
-      const locked = it.minLv > state.opLv;
-      const o = el('option', null, `${'★'.repeat(it.rarity || 0)} ${it.name}` +
-        gearAffixPreview(it) +
-        (locked ? ` — needs Lv ${it.minLv}` : ''));
-      o.value = it.id;
-      o.dataset.minlv = it.minLv ?? 0;
-      o.disabled = locked;
-      o.selected = cur?.id === it.id;
-      sel.appendChild(o);
+      gItems.push({
+        value: it.id,
+        text: `${'★'.repeat(it.rarity || 0)} ${it.name}` + gearAffixPreview(it),
+        group: it.suit ? (DATA.equipment.suits[it.suit]?.name || it.suit) : 'Generic (no set)',
+        minLv: it.minLv ?? 0,
+      });
     }
-    // keep the current selection visible even if it is locked out by level
-    if (cur && ![...sel.options].some((o) => o.value === cur.id)) {
-      const it = DATA.equipment.items[cur.id];
-      const o = el('option', null, `${it ? it.name : cur.id} (Lv ${state.opLv} — locked)`);
-      o.value = cur.id;
-      o.selected = true;
-      sel.appendChild(o);
-    }
-    gc.appendChild(ctlRow(slot.name, sel, `${slot.tip}. Locked pieces need a higher operator level.`));
+    const gCombo = combo({
+      label: slot.name,
+      tip: `${slot.tip} — start typing to search by piece or suit name. ` +
+        'Locked pieces need a higher operator level.',
+      items: gItems,
+      selected: cur ? cur.id : '',
+      onChange: (v) => {
+        // switching pieces resets per-affix stages (fresh piece, stage 0 each)
+        state.gear[slot.key] = v ? { id: v, en: {} } : null;
+        renderEnhSlot(slot);
+        re();
+      },
+    });
+    gc.appendChild(gCombo.wrap);
+    gearCombos[slot.key] = gCombo;
 
     // per-affix enhancement sliders (rebuilt when the piece changes)
     const enh = el('div', 'enhbox');
@@ -596,6 +724,8 @@ function renderControls() {
   c.appendChild(dwc);
 
   // --- bindings --------------------------------------------------------------
+  // (the operator / weapon / gear comboboxes wire their onChange inside the
+  //  combo() calls above; only the sliders and number inputs are bound here)
   const re = () => renderResults();
   const bindNum = (id) => {
     $(id).oninput = () => {
@@ -603,41 +733,18 @@ function renderControls() {
       re();
     };
   };
-  opSel.onchange = () => {
-    state.opId = opSel.value;
-    const op = operatorById(state.opId);
-    if (op && op.defaultWeapon) state.weaponId = op.defaultWeapon;
-    renderControls();
-    re();
-  };
   opLv.el.oninput = () => {
     state.opLv = +opLv.el.value;
     opLv.render();
     updateGearLocks(); // gear availability depends on operator level (in place: drag-safe)
     re();
   };
-  wSel.onchange = () => { state.weaponId = wSel.value; renderControls(); re(); };
   $('weaponLv').oninput = () => { state.weaponLv = +$('weaponLv').value; $('weaponLvV').textContent = state.weaponLv; re(); };
-  for (const slot of SLOTS) {
-    $(`slot_${slot.key}`).onchange = () => {
-      const v = $(`slot_${slot.key}`).value;
-      // switching pieces resets per-affix stages (fresh piece, stage 0 each)
-      state.gear[slot.key] = v ? { id: v, en: {} } : null;
-      renderEnhSlot(slot);
-      re();
-    };
-  }
   bindNum('mobDef');
   bindNum('resist');
   bindNum('dmgBonus');
   bindNum('dmgReduction');
   $('staggered').onchange = () => { state.staggered = $('staggered').checked; re(); };
-}
-
-function gcSlotOptgroup(sel, label) {
-  const og = el('optgroup');
-  og.label = label;
-  sel.appendChild(og);
 }
 
 // ---------------------------------------------------------------------------
