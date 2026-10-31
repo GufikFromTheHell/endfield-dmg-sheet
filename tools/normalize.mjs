@@ -69,7 +69,9 @@ attrNames[9] = attrNames[9] || 'Crit Rate';
 attrNames[10] = attrNames[10] || 'Crit DMG';
 attrNames[39] = attrNames[39] || 'Strength';
 attrNames[40] = attrNames[40] || 'Agility';
-attrNames[41] = attrNames[41] || 'Wisdom';
+// attr 41: the EN dump never spells it out (only an icon_attribute_wisd asset),
+// so the label is curated here — the in-game name is "Intellect".
+attrNames[41] = attrNames[41] || 'Intellect';
 attrNames[42] = attrNames[42] || 'Will';
 for (const code of [0, 1, 2, 3, 9, 10, 39, 40, 41, 42]) {
   if (!attrNames[code]) note(`attribute code ${code} has no display name`);
@@ -94,7 +96,7 @@ for (const [k, v] of Object.entries(professionTable)) professions[v.profession] 
 // ------------------------------------------------------- operator potential
 // CharacterPotentialTable: each operator -> a 5-tier unlock bundle. Each tier's
 // effect row (PotentialTalentEffectTable.dataList) may carry:
-//   - attribute modifiers: 39–42 (Str/Agi/Wis/Will flats; P2-style rows grant
+//   - attribute modifiers: 39–42 (Str/Agi/Intel/Will flats; P2-style rows grant
 //     all four, but only the operator's main/sub attributes affect damage —
 //     the engine buckets by attr code) and 9 (crit rate fraction) — these are
 //     folded into the model
@@ -132,7 +134,7 @@ function operatorPotential(opId) {
 
 // ------------------------------------------------------- weapon essence (gems)
 // Slot roles from WeaponBasicTable.weaponSkillList prefixes:
-//   wpn_attr_*    = main-stat gem (mainattr / raw Str|Agi|Wis|Will flats)
+//   wpn_attr_*    = main-stat gem (mainattr / raw Str|Agi|Intel|Will flats)
 //   wpn_sp_attr_* = sub-stat gem (ATK %, crit rate, elemental/Arts DMG %)
 //   sk_wpn_*      = weapon-skill gem (the weapon passive)
 // Ranks R1–R9 are levels 1–9 of the gem's own SkillPatchTable bundle — the
@@ -230,7 +232,7 @@ function essenceSlots(w) {
 }
 
 // ------------------------------------------------------- operators
-const SLOT_CODES = [1, 2, 3, 9, 10, 39, 40, 41, 42]; // hp, atk, def, critRate, critDmg, str, agi, wis, wil
+const SLOT_CODES = [1, 2, 3, 9, 10, 39, 40, 41, 42]; // hp, atk, def, critRate, critDmg, str, agi, intellect, will
 const operators = [];
 for (const [id, op] of Object.entries(charTable)) {
   if (id === 'chr_9000_endmin') { note('skipped mannequin chr_9000_endmin'); continue; }
@@ -271,7 +273,7 @@ for (const [id, op] of Object.entries(charTable)) {
 }
 // sanity: Laevatain L90 base ATK
 const laev = operators.find((o) => o.id === 'chr_0016_laevat');
-if (laev) fact(`Laevatain L90: HP=${laev.levels[89].a[0]} ATK=${laev.levels[89].a[1]} crit=${laev.levels[89].a[3]} wis=${laev.levels[89].a[7]}`);
+if (laev) fact(`Laevatain L90: HP=${laev.levels[89].a[0]} ATK=${laev.levels[89].a[1]} crit=${laev.levels[89].a[3]} intellect=${laev.levels[89].a[7]}`);
 
 // ------------------------------------------------------- weapons
 // Weapon origin (probed from the dump, the three sets do not overlap):
@@ -361,7 +363,7 @@ const LABELS = {
   usgs: (v) => `+${pct(v)}% SP Gain`,
   heal: (v) => `+${pct(v)}% Heal Output`,
   hp: (v) => `+${pct(v)}% Max HP`,
-  wisd: (v) => `+${v} Wisdom`,
+  wisd: (v) => `+${v} Intellect`,
   agi: (v) => `+${v} Agility`,
   will: (v) => `+${v} Will`,
   str: (v) => `+${v} Strength`,
@@ -503,15 +505,28 @@ const keyOf = (am) => {
   const frac = am.modifierType === 6;
   return (frac ? '0p' : '0f') + (main ? 'm' : 's');
 };
+// Enhanceable slots per piece: the game caps them at 3 (EquipConst). The dump
+// lists them in displayAttrModifiers — one row per slot, carrying the 4-stage
+// value array (attrValue + enhancedAttrValues) and, for composites, the
+// group of equip rows it covers (same 4-stage values). Rows with an empty
+// enhancedAttrValues (t0–t3 pieces) are fixed in-game and get no slot.
+// Match display rows to equip rows by attrIndex first (display numbering can
+// drift from equip numbering on some pieces), falling back to the 4-stage
+// value match (relative tolerance 1e-4) — validated against all 276 pieces.
+const enhClose = (a, b) => Math.abs(a - b) <= Math.max(1e-6, Math.max(Math.abs(a), Math.abs(b)) * 1e-4);
+const enhSameArr = (a, b) => a.length === b.length && a.length > 0 && a.every((v, i) => enhClose(v, b[i]));
 const equipItems = {};
 let equipNoName = 0;
+let enhSlotCount = 0;
+let enhUnmatched = 0;
 for (const [id, rec] of Object.entries(equipTable)) {
   const m = id.match(/^item_equip_t(\d)_(?:parts|suit)_(\w+)_(body|hand|edc)_(\d+)$/);
   const itemRec = itemTable[id];
   const name = (itemRec && T(itemRec.name)) || '';
   if (!name) equipNoName++;
   const st = [{}, {}, {}, {}];
-  for (const am of rec.equipAttrModifiers ?? []) {
+  const rows = rec.equipAttrModifiers ?? [];
+  for (const am of rows) {
     const key = keyOf(am);
     const vals = am.attrValues ?? [];
     for (let s = 0; s < 4; s++) {
@@ -520,6 +535,28 @@ for (const [id, rec] of Object.entries(equipTable)) {
       st[s][key] = st[s][key] == null ? r3(v) : r3(st[s][key] + v);
     }
   }
+  // game slots -> groups of bundle keys (order: display rows, then rows)
+  const byIdx = {};
+  for (const am of rows) (byIdx[am.attrIndex] ||= []).push(am);
+  const used = new Set();
+  const enh = [];
+  for (const d of rec.displayAttrModifiers ?? []) {
+    const ev = d.enhancedAttrValues ?? [];
+    if (!ev.length) continue; // fixed in-game — no enhanceable slot
+    const dv = [d.attrValue, ...ev];
+    const idxRows = (byIdx[d.attrIndex] ?? []).filter((am) => !used.has(am));
+    const hit = (idxRows.length && idxRows.every((am) => enhSameArr(am.attrValues ?? [], dv)))
+      ? idxRows
+      : rows.filter((am) => !used.has(am) && enhSameArr(am.attrValues ?? [], dv));
+    if (!hit.length) {
+      enhUnmatched++;
+      note(`${id}: display slot ${d.attrIndex} (pack ${d.packAttrType || '?'}) unmatched`);
+      continue;
+    }
+    for (const am of hit) used.add(am);
+    enh.push(hit.map((am) => String(keyOf(am))));
+  }
+  enhSlotCount += enh.length;
   equipItems[id] = {
     id,
     name: name || id.replace(/^item_equip_/, ''),
@@ -529,9 +566,11 @@ for (const [id, rec] of Object.entries(equipTable)) {
     minLv: rec.minWearLv ?? 0,
     rarity: itemRec?.rarity ?? 0,
     st,
+    enh,
   };
 }
 if (equipNoName) note(`${equipNoName} equip pieces have no i18n name`);
+fact(`enhanceable slots: ${enhSlotCount} across ${Object.keys(equipItems).length} pieces (<=3 per piece, as in-game); unmatched display slots: ${enhUnmatched}`);
 const suits = {};
 for (const [sid, rec] of Object.entries(suitTable)) {
   const name = (rec.list ?? []).map((l) => T(l.suitName)).find(Boolean) || sid;
@@ -568,7 +607,7 @@ for (const [k, label] of Object.entries({
   53: 'Cryst DMG Bonus', 54: 'Natural DMG Bonus',
   10: 'Critical DMG', 17: 'Basic ATK DMG Bonus', 28: 'Ultimate Skill DMG Bonus',
   32: 'Battle Skill DMG Bonus', 33: 'Combo Skill DMG Bonus',
-  39: 'Strength', 40: 'Agility', 41: 'Wisdom', 42: 'Will',
+  39: 'Strength', 40: 'Agility', 41: 'Intellect', 42: 'Will',
   '0fm': 'Main Attribute', '0pm': 'Main Attribute', '0fs': 'Secondary Attribute', '0ps': 'Secondary Attribute',
 })) affixNames[k] = label;
 delete affixNames['0']; // pseudo-keys replace the old colliding "0"

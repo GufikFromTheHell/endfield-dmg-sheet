@@ -305,7 +305,7 @@ export const ELEMENT_ATTR = {
  * Returns:
  *   flatAtk      flat ATK from gear (attrType 2, modifierType 7; values >= 1)
  *   atkPct       ATK % from gear (attrType 2, modifierType 6 fraction ×100)
- *   main         {39|40|41|42: value} — Str/Agi/Wis/Will; added to the
+ *   main         {39|40|41|42: value} — Str/Agi/Intel/Will; added to the
  *                 character's main/sub attribute values BEFORE the stat
  *                 bonus multiplier (as in-game)
  *   critRatePct  crit rate bonus % (attrType 9, fraction ×100)

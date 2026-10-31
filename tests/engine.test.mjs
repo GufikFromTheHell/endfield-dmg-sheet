@@ -458,7 +458,7 @@ test('buildAttack: Main/Sub affixes fold into the stat bonus (Laevatain)', () =>
       d2: { id: 'item_equip_t4_suit_heal01_edc_03', en: 0 },   // Main 20.7%
     }, 'Fire'),
   });
-  // heal01 edc_03 also grants 21 flat Wisd (plain main-stat affix)
+  // heal01 edc_03 also grants 21 flat Intellect (plain main-stat affix)
   closeTo(f.mainTotal, (177.985 + 21 + 27) * 1.207, 1e-3, '(base + flats) x (1 + frac)');
 });
 
