@@ -1,5 +1,7 @@
 # Endfield DMG Calculator
 
+**Live: <https://GufikFromTheHell.github.io/endfield-dmg-sheet/>**
+
 A **truly free** (no signup, no subscription) damage calculator for
 **Arknights: Endfield**. Static site, zero backend, zero runtime dependencies.
 
@@ -55,13 +57,14 @@ download when the commit is unchanged.
 5. if the dump changed, commit the refreshed `data/` back to the repo
 6. deploy `dist/` to GitHub Pages
 
-One-time setup:
+Notes:
 
-1. Create a new (empty) GitHub repo, e.g. `endfield-dmg-calc`
-2. In the repo: **Settings → Pages → Source: GitHub Actions**
-3. Push this project to the repo (`main` branch)
-4. The workflow deploys to `https://<username>.github.io/<repo>/`
-   (site URL appears under Settings → Pages after the first run)
+- The Pages site had to be created once from outside CI, because
+  `GITHUB_TOKEN` can never create a Pages site (permanent limitation).
+  It was created on 2026-10-31 via the REST API
+  (`POST /repos/{owner}/{repo}/pages` with `{"build_type":"workflow"}`,
+  any PAT with the `repo` scope) — see `actions/configure-pages#40`.
+  After that, deploys run entirely on `GITHUB_TOKEN`.
 
 The Vite build uses relative paths (`base: './'`), so the site works both
 at the repo root and in a `/project/` subpath.
