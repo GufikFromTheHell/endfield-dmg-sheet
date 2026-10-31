@@ -69,9 +69,11 @@ attrNames[9] = attrNames[9] || 'Crit Rate';
 attrNames[10] = attrNames[10] || 'Crit DMG';
 attrNames[39] = attrNames[39] || 'Strength';
 attrNames[40] = attrNames[40] || 'Agility';
-// attr 41: the EN dump never spells it out (only an icon_attribute_wisd asset),
-// so the label is curated here — the in-game name is "Intellect".
-attrNames[41] = attrNames[41] || 'Intellect';
+// attr 41: the EN dump never spells it out (only an icon_attribute_wisd asset,
+// from which the icon fallback derives "Wisd") — but the in-game name is
+// "Intellect" (confirmed in the game's own suit descriptions, e.g.
+// "Intellect +50. When HP > 80%, Arts DMG +20%"). Force the curated label.
+attrNames[41] = 'Intellect';
 attrNames[42] = attrNames[42] || 'Will';
 for (const code of [0, 1, 2, 3, 9, 10, 39, 40, 41, 42]) {
   if (!attrNames[code]) note(`attribute code ${code} has no display name`);
