@@ -126,17 +126,18 @@ details.adv .inner { margin-top: 10px; }
   margin: 0 0 12px;
   display: grid;
   gap: 7px;
+  overflow: hidden; /* rows must never spill into the neighbouring column */
 }
 .enhrow { display: flex; align-items: center; gap: 9px; }
 .enhrow label {
-  flex: 0 0 190px;
+  flex: 0 0 138px;
   font-size: 12.5px;
   line-height: 1.25;
   color: var(--dim);
 }
-.enhrow input[type="range"] { flex: 1; min-width: 60px; padding: 0; accent-color: var(--accent); }
+.enhrow input[type="range"] { flex: 1; min-width: 52px; padding: 0; accent-color: var(--accent); }
 .enhrow .val {
-  flex: 0 0 58px;
+  flex: 0 0 54px;
   text-align: right;
   font-size: 12.5px;
   font-weight: 600;

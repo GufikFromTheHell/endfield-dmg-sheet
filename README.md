@@ -14,8 +14,9 @@ A **truly free** (no signup, no subscription) damage calculator for
 ## Features
 
 - Operator + weapon + potential picker (weapon list filters by weapon type)
-- Gear picker: 4 slots (body / hand / 2 devices), per-slot enhance 0–3,
-  suit detection with 2-pc / 4-pc passive bonuses
+- Gear picker: 4 slots (body / hand / 2 devices); up to 3 enhanceable
+  affix slots per piece (0–3 each, composite slots as one slider — as
+  in-game), suit detection with the fixed 3-piece passive bonus
 - Target editor: fully configurable mob (manual DEF), elemental resistance,
   staggered toggle, extra damage bonus — no enemy presets
 - Per-skill damage table (min / avg / max, crit included) + DPS

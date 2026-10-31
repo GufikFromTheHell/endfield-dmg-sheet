@@ -143,6 +143,36 @@ function affixKeysOf(item) {
   return keys;
 }
 
+// In-game composite slots: one slider covers the whole group of bundle keys
+// (the dump's displayAttrModifiers lists exactly those groups, at most 3 per
+// piece). Keyed by the sorted bundle-key signature.
+const COMPOSITE_LABELS = {
+  '28|32|33': 'All Skill DMG',
+  '51|52|53|54': 'All Element DMG',
+  '51|54': 'Fire & Natural DMG',
+  '52|53': 'Pulse & Cryst DMG',
+  '4|5|6|7|48|60': 'Final DMG Reduction',
+};
+
+// The piece's enhanceable groups (arrays of bundle-key strings, <=3), from
+// the normalized `enh` field. Legacy fallback: one group per growing key.
+function enhGroupsOf(item) {
+  if (Array.isArray(item.enh)) return item.enh;
+  const groups = [];
+  for (const k of affixKeysOf(item)) {
+    if (TAKEN_KEYS.includes(k) || k === DEF_KEY) continue;
+    if (item.st.some((s) => s[k] !== item.st[0][k])) groups.push([k]);
+  }
+  return groups;
+}
+
+// Display label for an enhanceable group (composite or single affix).
+function groupLabel(grp) {
+  if (grp.length === 1) return affixLabel(grp[0]);
+  const sig = grp.slice().sort().join('|');
+  return COMPOSITE_LABELS[sig] || grp.map(affixLabel).join(' / ');
+}
+
 // Enhancement stage of one affix for a slot selection. `en` is either a
 // number (uniform, legacy/tests) or a {affixKey: 0-3} map (the UI keeps it
 // as a map, possibly empty = all stage 0). Missing map keys → stage 0.
@@ -180,23 +210,32 @@ function enSummaryText(sel, item) {
   return uniq.length === 1 ? ` +${uniq[0]}` : ` +${uniq.join('/')}`;
 }
 
-// "( +N Label, +N Label )" stage-0 preview appended to gear option labels.
+// "( +N Label, +N Label )" stage-0 preview appended to gear option labels:
+// one entry per enhanceable group (a composite as a single entry), then
+// affixes that belong to no group.
 function gearAffixPreview(item) {
   const st = item.st[0];
   const parts = [];
-  for (const [t, v] of Object.entries(st)) {
-    if (TAKEN_KEYS.includes(t) || t === DEF_KEY) continue;
-    parts.push(`${affixValueText(t, v)} ${affixLabel(t)}`);
+  const grouped = new Set();
+  for (const grp of enhGroupsOf(item)) {
+    if (grp.every((k) => TAKEN_KEYS.includes(k))) continue;
+    if (st[grp[0]] == null) continue;
+    for (const k of grp) grouped.add(k);
+    parts.push(`${affixValueText(grp[0], st[grp[0]])} ${groupLabel(grp)}`);
+  }
+  for (const k of affixKeysOf(item)) {
+    if (TAKEN_KEYS.includes(k) || k === DEF_KEY || grouped.has(k)) continue;
+    parts.push(`${affixValueText(k, st[k])} ${affixLabel(k)}`);
   }
   return parts.length ? ` ( ${parts.join(', ')} )` : '';
 }
 
-// Rebuild the per-affix enhancement box for one gear slot. Each affix the
-// piece actually has gets its own 0-3 slider (in-game you choose which
-// affixes to enhance, independently); affixes that never change across
-// stages are shown as fixed lines. The six taken-scalars are skipped here
-// (they are summarized in the gear results), as is DEF (constant, not
-// enhanceable in-game, and irrelevant to outgoing damage).
+// Rebuild the enhancement box for one gear slot. Each *enhanceable slot*
+// the piece has (at most 3, as in-game) gets one 0-3 slider; composite
+// slots (e.g. “All Skill DMG”) cover their whole bundle of affix keys with
+// a single slider. Affixes outside any enhanceable slot (fixed at every
+// stage, or the six taken-scalars / DEF that are summarized in the gear
+// results) are shown as fixed lines.
 function renderEnhSlot(slot) {
   const box = $(`enh_${slot.key}`);
   if (!box) return;
@@ -207,37 +246,46 @@ function renderEnhSlot(slot) {
     box.appendChild(el('div', 'enhempty', 'Pick a piece to adjust its affixes.'));
     return;
   }
+  const groups = enhGroupsOf(item);
+  const grouped = new Set();
+  for (const grp of groups) for (const k of grp) grouped.add(k);
+  for (const grp of groups) {
+    if (grp.every((k) => TAKEN_KEYS.includes(k))) continue; // summarized in the gear results
+    const label = groupLabel(grp);
+    // group members share one 4-stage value array, so any member shows the
+    // stage value; prefer a non-taken key when the group mixes both
+    const showKey = grp.find((k) => !TAKEN_KEYS.includes(k)) ?? grp[0];
+    const row = el('div', 'enhrow');
+    const lab = el('label', null, label);
+    lab.title = `Enhancement stage (0–3) of the ${label} slot on this piece — up to 3 slots per piece, as in-game.`;
+    const inp = document.createElement('input');
+    inp.type = 'range';
+    inp.id = `enh_${slot.key}_${grp[0]}`;
+    inp.min = 0;
+    inp.max = 3;
+    inp.step = 1;
+    inp.value = enStageOf(sel, showKey);
+    inp.title = lab.title;
+    const val = el('span', 'val', affixValueText(showKey, item.st[+inp.value][showKey]));
+    val.id = `enh_${slot.key}_${grp[0]}V`;
+    inp.oninput = () => {
+      sel.en = sel.en || {};
+      for (const k of grp) sel.en[k] = +inp.value; // one slider = one slot: the whole bundle moves together
+      val.textContent = affixValueText(showKey, item.st[+inp.value][showKey]);
+      renderResults();
+    };
+    row.appendChild(lab);
+    row.appendChild(inp);
+    row.appendChild(val);
+    box.appendChild(row);
+  }
   for (const k of affixKeysOf(item)) {
-    if (TAKEN_KEYS.includes(k) || k === DEF_KEY) continue;
-    const grows = item.st.some((s) => s[k] !== item.st[0][k]);
+    if (TAKEN_KEYS.includes(k) || k === DEF_KEY || grouped.has(k)) continue;
     const row = el('div', 'enhrow');
     const lab = el('label', null, affixLabel(k));
-    if (grows) {
-      lab.title = `Enhancement stage (0–3) of the ${affixLabel(k)} affix on this piece — each affix is enhanced independently, like in-game.`;
-      const inp = document.createElement('input');
-      inp.type = 'range';
-      inp.id = `enh_${slot.key}_${k}`;
-      inp.min = 0;
-      inp.max = 3;
-      inp.step = 1;
-      inp.value = enStageOf(sel, k);
-      inp.title = lab.title;
-      const val = el('span', 'val', affixValueText(k, item.st[+inp.value][k]));
-      val.id = `enh_${slot.key}_${k}V`;
-      inp.oninput = () => {
-        sel.en = sel.en || {};
-        sel.en[k] = +inp.value;
-        val.textContent = affixValueText(k, item.st[+inp.value][k]);
-        renderResults();
-      };
-      row.appendChild(lab);
-      row.appendChild(inp);
-      row.appendChild(val);
-    } else {
-      lab.title = `The ${affixLabel(k)} affix on this piece is the same at every enhancement stage.`;
-      row.appendChild(lab);
-      row.appendChild(el('span', 'val', affixValueText(k, item.st[0][k])));
-    }
+    lab.title = `The ${affixLabel(k)} affix on this piece is the same at every enhancement stage.`;
+    row.appendChild(lab);
+    row.appendChild(el('span', 'val', affixValueText(k, item.st[0][k])));
     box.appendChild(row);
   }
 }
@@ -262,7 +310,7 @@ function ctlRow(label, node, tip) {
   return d;
 }
 
-function range(id, label, min, max, value, tip) {
+function range(id, label, min, max, value, tip, step = 1) {
   const d = el('div', 'ctl');
   const l = el('label', null, `${label} <span class="val" id="${id}V">${value}</span>`);
   if (tip) l.title = tip;
@@ -271,7 +319,7 @@ function range(id, label, min, max, value, tip) {
   inp.id = id;
   inp.min = min;
   inp.max = max;
-  inp.step = 1;
+  inp.step = step;
   inp.value = value;
   d.appendChild(l);
   d.appendChild(inp);
@@ -294,7 +342,7 @@ function numInput(id, label, value, step, tip) {
 }
 
 // attribute names for potential tier lines
-const POT_ATTR_NAMES = { 39: 'Strength', 40: 'Agility', 41: 'Intellect', 42: 'Willpower' };
+const POT_ATTR_NAMES = { 39: 'Strength', 40: 'Agility', 41: 'Intellect', 42: 'Will' };
 
 // renders the active potential tier lines (P1..P{pot}) under the slider
 function renderPotInfo() {
@@ -449,6 +497,7 @@ function renderControls() {
     sel.id = `slot_${slot.key}`;
     const none = el('option', null, '— none —');
     none.value = '';
+    sel.appendChild(none);
     const cur = state.gear[slot.key];
     if (!cur) none.selected = true;
 
@@ -497,9 +546,10 @@ function renderControls() {
   }
 
   gc.appendChild(el('p', 'hint',
-    'Pick up to 4 pieces (body / hand / 2 devices). Matching 3 pieces of a set activates its passive below. ' +
-    'Each piece’s affixes are enhanced separately (0–3 per affix) — just like in-game, where you choose what to enhance; ' +
-    'affixes shown without a slider are the same at every stage. Leave “none” for a no-gear baseline.'));
+    'Pick up to 4 pieces (body / hand / 2 devices). Matching 3 pieces of a set activates its passive below — ' +
+    'set passives are fixed in-game and cannot be toggled on/off. Each piece has up to 3 enhanceable slots ' +
+    '(0–3 per slot, as in-game); a composite slot like “All Skill DMG” is a single slider covering its whole bundle. ' +
+    'Affixes shown without a slider are fixed at every stage. Leave “none” for a no-gear baseline.'));
 
   c.appendChild(gc);
 
@@ -528,6 +578,22 @@ function renderControls() {
   tc.appendChild(chk);
 
   c.appendChild(tc);
+
+  // --- DPS window card ---------------------------------------------------------
+  // These sliders live in the static controls column, NOT inside the results
+  // cards: renderResults() rebuilds the results on every input, and a slider
+  // recreated there dies mid-drag, making it feel stuck and stuttery.
+  const dwc = el('div', 'card');
+  dwc.appendChild(el('h2', null, 'DPS window'));
+  const win1 = range('winSecs', 'Window, seconds', 1, 60, state.windowSecs,
+    'Length of the single-operator DPS window in seconds. Shorter = burst, longer = sustained.', 0.1);
+  win1.el.oninput = () => { state.windowSecs = +win1.el.value; win1.render(); renderResults(); };
+  dwc.appendChild(win1.wrap);
+  const win2 = range('teamWinSecs', 'Team window, seconds', 1, 120, state.teamWindow,
+    'Seconds over which the whole team sequence is repeated (team DPS).', 0.1);
+  win2.el.oninput = () => { state.teamWindow = +win2.el.value; win2.render(); renderResults(); };
+  dwc.appendChild(win2.wrap);
+  c.appendChild(dwc);
 
   // --- bindings --------------------------------------------------------------
   const re = () => renderResults();
@@ -758,7 +824,9 @@ function renderResults() {
     }
     if (g.suitBonuses.length) {
       const sdiv = el('div', 'sets');
-      sdiv.appendChild(el('div', 'sethead', 'Active set bonuses'));
+      const sh = el('div', 'sethead', 'Active set bonuses');
+      sh.title = 'Set passives are fixed in-game: wearing 3 pieces of a suit activates the bonus automatically — it cannot be toggled on/off.';
+      sdiv.appendChild(sh);
       for (const b of g.suitBonuses) {
         sdiv.appendChild(el('div', 'setline', `${b.cnt}-pc · <b>${b.name}</b> — ${bbDesc(b.bb)}`));
       }
@@ -811,27 +879,9 @@ function renderResults() {
   // --- dps card ---------------------------------------------------------------
   const dcard = el('div', 'card');
   dcard.appendChild(el('h2', null, 'DPS (all skills per window)'));
-  const wrow = el('div', 'ctl');
-  wrow.appendChild(el('label', null, 'Window, seconds <span class="val" id="winV">' + state.windowSecs + '</span>'));
-  wrow.lastChild.title = 'Length of the DPS window in seconds. Shorter = burst, longer = sustained.';
-  const win = document.createElement('input');
-  win.type = 'range';
-  win.id = 'winSecs';
-  win.min = 1;
-  win.max = 60;
-  win.step = 0.1;
-  win.value = state.windowSecs;
-  win.oninput = () => {
-    state.windowSecs = +win.value;
-    $('winV').textContent = win.value;
-    renderResults();
-  };
-  wrow.appendChild(win);
-  dcard.appendChild(wrow);
-
   const dbox = el('div', 'dpsbox');
   dbox.appendChild(
-    el('div', null, `<span class="big">${fmt(dps(totAvg, state.windowSecs))}</span> <span class="tag">avg DPS</span>`)
+    el('div', null, `<span class="big">${fmt(dps(totAvg, state.windowSecs))}</span> <span class="tag">avg DPS</span> <span class="tag">${state.windowSecs}s window</span>`)
   );
   dbox.appendChild(
     el('div', null, `<span style="font-size:15px;font-weight:650">${fmt(dps(totMin, state.windowSecs))}</span> <span class="tag">min</span>`)
@@ -974,22 +1024,8 @@ function renderTeam(r, /* unused; team recomputes target itself */ _tgt) {
     const trow = el('div', 'teamrow');
     trow.appendChild(el('span', null, `Team total (all members, all casts): <b>${fmt(teamAvg)}</b> avg · ${fmt(teamMin)} min · ${fmt(teamMax)} max`));
 
-    const wrow = el('div', 'ctl');
-    const wl = el('label', null, `Team window, seconds <span class="val">${state.teamWindow}</span>`);
-    wl.title = 'Seconds over which the team sequence is repeated';
-    const win = document.createElement('input');
-    win.type = 'range';
-    win.min = 1;
-    win.max = 120;
-    win.step = 0.1;
-    win.value = state.teamWindow;
-    win.oninput = () => { state.teamWindow = +win.value; renderResults(); };
-    wrow.appendChild(wl);
-    wrow.appendChild(win);
-    card.appendChild(wrow);
-
     card.appendChild(el('div', 'teamdps',
-      `<span class="big">${fmt(dps(teamAvg, state.teamWindow))}</span> <span class="tag">team avg DPS</span>`));
+      `<span class="big">${fmt(dps(teamAvg, state.teamWindow))}</span> <span class="tag">team avg DPS</span> <span class="tag">${state.teamWindow}s window</span>`));
   }
   r.appendChild(card);
 }
