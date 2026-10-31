@@ -10,7 +10,6 @@ import {
   gearContribution,
   calcHit,
   dps,
-  enemyAtLevel,
 } from './engine.mjs';
 
 // ---------------------------------------------------------------------------
@@ -25,14 +24,13 @@ async function loadJson(name) {
 
 const DATA = {};
 try {
-  [DATA.meta, DATA.operators, DATA.weapons, DATA.skills, DATA.enemies,
+  [DATA.meta, DATA.operators, DATA.weapons, DATA.skills,
    DATA.traits, DATA.equipment] =
     await Promise.all([
       loadJson('data/meta.json'),
       loadJson('data/operators.json'),
       loadJson('data/weapons.json'),
       loadJson('data/skills.json'),
-      loadJson('data/enemies.json'),
       loadJson('data/traits.json'),
       loadJson('data/equipment.json'),
     ]);
@@ -64,10 +62,11 @@ const state = {
   opLv: 90,
   weaponId: '',
   weaponLv: 90,
-  potLv: 0,
-  skillLv: 12,
-  enemyId: 'dummy',
-  enemyLv: 20,
+  pot: 0,
+  skillLv: { basic: 12, skill: 12, ult: 12 }, // skill tree -> level (1-12)
+  essRanks: { main: 0, sub: 0, skill: 0 },
+  // configurable mob: plain numbers, no enemy presets
+  mobDef: 0,
   resist: 0,
   dmgBonus: 0,
   dmgReduction: 0,
@@ -87,37 +86,18 @@ function operatorById(id) {
   return DATA.operators.find((o) => o.id === id);
 }
 
-function weaponsForOp(opId) {
-  const op = operatorById(opId);
-  const list = DATA.weapons.weapons;
-  return list.filter((w) => (op ? w.type === op.weaponType : true));
-}
-
-// Enemy ids/tokens are the only names in the dump; title-case them for display.
-function enemyLabel(e) {
-  const raw = e.dummy ? 'Training dummy (real, DEF 100)' :
-    e.name.split(/[_\s]+/).map((p) => (p ? p[0].toUpperCase() + p.slice(1) : p)).join(' ');
-  const def = enemyAtLevel(DATA.enemies, e.id, state.enemyLv)?.def ?? 0;
-  return `${raw} (DEF ${fmt(def)})`;
-}
-
-function enemyDef() {
-  if (state.enemyId === 'dummy') return 0;
-  const e = enemyAtLevel(DATA.enemies, state.enemyId, state.enemyLv);
-  return e ? e.def : 0;
-}
-
 // Resolve the full attack stack for the current single-operator panel.
 function currentBuild() {
   const op = operatorAtLevel(DATA.operators, state.opId, state.opLv);
   if (!op) return null;
   const gear = gearContribution(DATA.equipment, state.gear, op.element);
-  const build = buildAttack(DATA.operators, DATA.weapons, DATA.traits, {
+  const build = buildAttack(DATA.operators, DATA.weapons, {
     opId: state.opId,
     opLv: state.opLv,
     weaponId: state.weaponId || op.defaultWeapon,
     weaponLv: state.weaponLv,
-    potLv: state.potLv,
+    pot: state.pot,
+    essRanks: state.essRanks,
     gear,
   });
   return { op, gear, build };
@@ -129,9 +109,9 @@ function targetParams() {
   let taken = gear.takenMult;
   for (const b of gear.suitBonuses) taken *= (b.bb?.dmg_taken_down ?? 1);
   return {
-    targetDef: enemyDef(),
+    targetDef: state.mobDef,
     targetResistPct: state.resist,
-    damageBonusPct: (op ? state.dmgBonus + gear.elemBonusPct + build.suitPct.dmg : 0),
+    damageBonusPct: (op ? state.dmgBonus + gear.elemBonusPct + build.suitPct.dmg + build.essDmgPct : 0),
     damageReductionPct: state.dmgReduction,
     damageTakenMult: op ? taken : 1,
     staggered: state.staggered,
@@ -140,6 +120,126 @@ function targetParams() {
 
 function affixLabel(key) {
   return DATA.equipment?.affixNames?.[key] || String(key);
+}
+
+// The six taken-scalar affixes (damage-taken multipliers and the like) are
+// aggregated into a single product in the gear summary, so they are hidden
+// from the per-affix enhancement sliders and previews.
+const TAKEN_KEYS = ['4', '5', '6', '7', '48', '60'];
+
+// DEF (attrType 3): constant at every stage in the dump (not enhanceable
+// in-game) and does not affect outgoing damage — hidden from all armor
+// displays.
+const DEF_KEY = '3';
+
+// Affix keys a piece has, unioned across its 4 stages (dump order; the
+// affix set is identical at every stage of a piece).
+function affixKeysOf(item) {
+  const keys = [];
+  const seen = new Set();
+  for (const s of item.st) for (const k of Object.keys(s)) {
+    if (!seen.has(k)) { seen.add(k); keys.push(k); }
+  }
+  return keys;
+}
+
+// Enhancement stage of one affix for a slot selection. `en` is either a
+// number (uniform, legacy/tests) or a {affixKey: 0-3} map (the UI keeps it
+// as a map, possibly empty = all stage 0). Missing map keys → stage 0.
+function enStageOf(sel, key) {
+  if (!sel) return 0;
+  const raw = (typeof sel.en === 'object' && sel.en !== null) ? sel.en[key] : sel.en;
+  return Math.min(3, Math.max(0, (raw | 0)));
+}
+
+// The piece's current per-affix values (each affix at its own stage).
+function pieceStats(sel, item) {
+  const st = {};
+  for (const k of affixKeysOf(item)) st[k] = item.st[enStageOf(sel, k)][k];
+  return st;
+}
+
+// Human value for one affix (mirrors the results formatting).
+function affixValueText(t, v) {
+  if (t === '0fm' || t === '0fs') return `+${v} pts`;
+  if (t === '0pm' || t === '0ps') return `+${(v * 100).toFixed(1)}%`;
+  if (v < 1 && [2, 9, 10, 17, 28, 29, 32, 33, 44, 50, 51, 52, 53, 54, 61, 87].includes(+t)) {
+    return `+${(v * 100).toFixed(1)}%`;
+  }
+  return `+${fmt(v, 2)}`;
+}
+
+// "+N" or "+a/b/c" (ascending distinct stages) for the piece line in the
+// gear summary; '' when nothing is enhanced.
+function enSummaryText(sel, item) {
+  const stages = affixKeysOf(item)
+    .filter((k) => !TAKEN_KEYS.includes(k))
+    .map((k) => enStageOf(sel, k));
+  if (!stages.length || stages.every((s) => s === 0)) return '';
+  const uniq = [...new Set(stages)].sort((a, b) => a - b);
+  return uniq.length === 1 ? ` +${uniq[0]}` : ` +${uniq.join('/')}`;
+}
+
+// "( +N Label, +N Label )" stage-0 preview appended to gear option labels.
+function gearAffixPreview(item) {
+  const st = item.st[0];
+  const parts = [];
+  for (const [t, v] of Object.entries(st)) {
+    if (TAKEN_KEYS.includes(t) || t === DEF_KEY) continue;
+    parts.push(`${affixValueText(t, v)} ${affixLabel(t)}`);
+  }
+  return parts.length ? ` ( ${parts.join(', ')} )` : '';
+}
+
+// Rebuild the per-affix enhancement box for one gear slot. Each affix the
+// piece actually has gets its own 0-3 slider (in-game you choose which
+// affixes to enhance, independently); affixes that never change across
+// stages are shown as fixed lines. The six taken-scalars are skipped here
+// (they are summarized in the gear results), as is DEF (constant, not
+// enhanceable in-game, and irrelevant to outgoing damage).
+function renderEnhSlot(slot) {
+  const box = $(`enh_${slot.key}`);
+  if (!box) return;
+  box.innerHTML = '';
+  const sel = state.gear[slot.key];
+  const item = sel ? DATA.equipment.items[sel.id] : null;
+  if (!item) {
+    box.appendChild(el('div', 'enhempty', 'Pick a piece to adjust its affixes.'));
+    return;
+  }
+  for (const k of affixKeysOf(item)) {
+    if (TAKEN_KEYS.includes(k) || k === DEF_KEY) continue;
+    const grows = item.st.some((s) => s[k] !== item.st[0][k]);
+    const row = el('div', 'enhrow');
+    const lab = el('label', null, affixLabel(k));
+    if (grows) {
+      lab.title = `Enhancement stage (0–3) of the ${affixLabel(k)} affix on this piece — each affix is enhanced independently, like in-game.`;
+      const inp = document.createElement('input');
+      inp.type = 'range';
+      inp.id = `enh_${slot.key}_${k}`;
+      inp.min = 0;
+      inp.max = 3;
+      inp.step = 1;
+      inp.value = enStageOf(sel, k);
+      inp.title = lab.title;
+      const val = el('span', 'val', affixValueText(k, item.st[+inp.value][k]));
+      val.id = `enh_${slot.key}_${k}V`;
+      inp.oninput = () => {
+        sel.en = sel.en || {};
+        sel.en[k] = +inp.value;
+        val.textContent = affixValueText(k, item.st[+inp.value][k]);
+        renderResults();
+      };
+      row.appendChild(lab);
+      row.appendChild(inp);
+      row.appendChild(val);
+    } else {
+      lab.title = `The ${affixLabel(k)} affix on this piece is the same at every enhancement stage.`;
+      row.appendChild(lab);
+      row.appendChild(el('span', 'val', affixValueText(k, item.st[0][k])));
+    }
+    box.appendChild(row);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +293,43 @@ function numInput(id, label, value, step, tip) {
   return { el: inp, wrap: d };
 }
 
+// attribute names for potential tier lines
+const POT_ATTR_NAMES = { 39: 'Strength', 40: 'Agility', 41: 'Intellect', 42: 'Willpower' };
+
+// renders the active potential tier lines (P1..P{pot}) under the slider
+function renderPotInfo() {
+  const box = $('potInfo');
+  if (!box) return;
+  const op = operatorById(state.opId);
+  box.innerHTML = '';
+  (op?.potential || []).slice(0, state.pot).forEach((t, i) => {
+    const line = el('div', 'potline');
+    if (t.attrs && t.attrs.length) {
+      line.textContent = `P${i + 1}: ` + t.attrs.map((a) => a.attr != null
+        ? `${POT_ATTR_NAMES[a.attr] || 'Attr ' + a.attr} +${a.flat}`
+        : `Critical Rate +${Math.round((a.cr || 0) * 100)}%`).join(', ');
+    } else {
+      line.textContent = `P${i + 1}: ` + ((t.info && t.info[0]) || 'Bonus improved').replace(/\{n\}/g, '?');
+      line.classList.add('dim');
+    }
+    box.appendChild(line);
+  });
+}
+
+// re-evaluates gear option locks in place; renderControls() must not be used
+// here — rebuilding while the level slider is being dragged would kill the
+// slider under the cursor (the old drag bug)
+function updateGearLocks() {
+  for (const slot of SLOTS) {
+    const sel = $(`slot_${slot.key}`);
+    if (!sel) continue;
+    for (const o of sel.options) {
+      if (!o.value || o.dataset.minlv == null) continue;
+      o.disabled = +o.dataset.minlv > state.opLv;
+    }
+  }
+}
+
 function renderControls() {
   const c = $('controls');
   c.innerHTML = '';
@@ -208,7 +345,8 @@ function renderControls() {
     (byProf[op.professionName || 'Other'] ||= []).push(op);
   }
   for (const prof of Object.keys(byProf).sort()) {
-    const og = el('optgroup', null, prof);
+    const og = el('optgroup');
+    og.label = prof;
     for (const op of byProf[prof].sort((a, b) => a.name.localeCompare(b.name))) {
       const o = el('option', null, op.name);
       o.value = op.id;
@@ -219,12 +357,40 @@ function renderControls() {
   }
   oc.appendChild(ctlRow('Operator', opSel, 'Pick the operator to calculate'));
 
-  const opLv = range('opLv', 'Level', 1, 99, state.opLv,
-    'Operator level (1–99). Base ATK and main/sub attributes scale with it.');
+  const opLv = range('opLv', 'Level', 1, 90, state.opLv,
+    'Operator level (1–90, in-game max). Base ATK and main/sub attributes scale with it; ' +
+    'raising the level also unlocks higher gear.');
   oc.appendChild(opLv.wrap);
-  const skLv = range('skillLv', 'Skill level', 1, 12, state.skillLv,
-    'Skill level (1–12). All damage skills scale with it.');
-  oc.appendChild(skLv.wrap);
+
+  // three level trees, exactly as in-game: every operator can only level up
+  // Basic Attack, Battle Skill (incl. the combo/follow-up skills) and the
+  // Ultimate. All other damage rows (dash/plunge/heavy hits, during-ult
+  // variants, ult follow-up hits) ride on one of these three.
+  const TREES = [
+    ['basic', 'Basic Attack', 'all basic hits — light/heavy chain, dash, plunge, and during-ult basics'],
+    ['skill', 'Battle Skill', 'the battle skill plus its combo/follow-up hits'],
+    ['ult', 'Ultimate', 'the ultimate plus its follow-up hits'],
+  ];
+  for (const [tree, label, cover] of TREES) {
+    const sk = range('sklv_' + tree, `${label} (1–12)`, 1, 12, state.skillLv[tree] ?? 12,
+      `Level (1–12) of the ${label} tree — raises every ${cover}.`);
+    sk.el.oninput = () => { state.skillLv[tree] = +sk.el.value; sk.render(); renderResults(); };
+    oc.appendChild(sk.wrap);
+  }
+
+  const pot = range('pot', 'Potential (0–5)', 0, 5, state.pot,
+    'Operator potential (0–5). Each tier unlocks a bonus; the active tiers are listed below.');
+  pot.el.oninput = () => {
+    state.pot = +pot.el.value;
+    pot.render();
+    renderPotInfo();
+    renderResults();
+  };
+  oc.appendChild(pot.wrap);
+  const potInfo = el('div', 'potinfo');
+  potInfo.id = 'potInfo';
+  oc.appendChild(potInfo);
+  renderPotInfo();
 
   c.appendChild(oc);
 
@@ -234,26 +400,43 @@ function renderControls() {
 
   const wSel = el('select');
   wSel.id = 'weaponSel';
-  const byRarity = {};
-  for (const w of weaponsForOp(state.opId)) {
-    (byRarity[w.rarity] ||= []).push(w);
+  // empty state.weaponId means "the operator's default weapon"
+  const effWeaponId = state.weaponId || operatorById(state.opId)?.defaultWeapon || '';
+  // all weapons, grouped by weapon type (rarity is shown per option, so the
+  // old per-rarity groups were replaced by type groups)
+  const byType = {};
+  for (const w of DATA.weapons.weapons) {
+    (byType[w.typeName || 'Other'] ||= []).push(w);
   }
-  for (const r of [6, 5, 4, 3, 2, 1].filter((r) => byRarity[r])) {
-    const og = el('optgroup', null, `${'★'.repeat(r)} ★`);
-    for (const w of byRarity[r].sort((a, b) => a.name.localeCompare(b.name))) {
-      const o = el('option', null, w.name);
+  for (const tn of Object.keys(byType).sort()) {
+    const og = el('optgroup');
+    og.label = tn;
+    for (const w of byType[tn].sort((a, b) =>
+      (b.rarity || 0) - (a.rarity || 0) || a.name.localeCompare(b.name))) {
+      const tag = w.origin === 'bp' ? ' [BP]' : w.origin === 'sig' ? ' [SIG]' : '';
+      const o = el('option', null, `${'★'.repeat(w.rarity || 0)} ${w.name}${tag}`);
       o.value = w.id;
-      o.selected = w.id === state.weaponId;
+      o.selected = w.id === effWeaponId;
       og.appendChild(o);
     }
     wSel.appendChild(og);
   }
-  wc.appendChild(ctlRow('Weapon', wSel, 'Weapon (filtered to the operator’s weapon type)'));
+  wc.appendChild(ctlRow('Weapon', wSel,
+    'Weapon, all of them, grouped by type. ★ = rarity; [BP] = battle-pass weapon, [SIG] = signature (paid gacha) weapon.'));
 
   wc.appendChild(range('weaponLv', 'Weapon level', 1, 90, state.weaponLv,
     'Weapon upgrade level (1–90). Raises weapon ATK.').wrap);
-  wc.appendChild(range('potLv', 'Potential (0–9)', 0, 9, state.potLv,
-    'Weapon potential. Grants the weapon’s potential bonus (e.g. +ATK).').wrap);
+
+  // weapon essence (gems): one slider per slot the selected weapon has
+  const curWeapon = DATA.weapons.weapons.find((w) => w.id === effWeaponId);
+  for (const role of ['main', 'sub', 'skill']) {
+    const slot = curWeapon?.essence?.find((s) => s.role === role);
+    if (!slot) continue;
+    const ess = range('ess_' + role, `Essence: ${slot.name} (0–9)`, 0, 9, state.essRanks[role],
+      `Essence rank (0–9) of the ${slot.name} slot — the gem’s level. Higher rank = stronger bonus.`);
+    ess.el.oninput = () => { state.essRanks[role] = +ess.el.value; ess.render(); renderResults(); };
+    wc.appendChild(ess.wrap);
+  }
 
   c.appendChild(wc);
 
@@ -288,8 +471,10 @@ function renderControls() {
       }
       const locked = it.minLv > state.opLv;
       const o = el('option', null, `${'★'.repeat(it.rarity || 0)} ${it.name}` +
+        gearAffixPreview(it) +
         (locked ? ` — needs Lv ${it.minLv}` : ''));
       o.value = it.id;
+      o.dataset.minlv = it.minLv ?? 0;
       o.disabled = locked;
       o.selected = cur?.id === it.id;
       sel.appendChild(o);
@@ -304,45 +489,27 @@ function renderControls() {
     }
     gc.appendChild(ctlRow(slot.name, sel, `${slot.tip}. Locked pieces need a higher operator level.`));
 
-    const en = el('select');
-    en.id = `en_${slot.key}`;
-    for (let i = 0; i <= 3; i++) {
-      const o = el('option', null, i === 0 ? 'None' : `+${i}`);
-      o.value = i;
-      o.selected = (cur?.en ?? 0) === i;
-      en.appendChild(o);
-    }
-    en.disabled = !cur;
-    gc.appendChild(ctlRow(`${slot.name} enhance`, en,
-      `Enhancement level for ${slot.name} (0–3). Each stage strengthens the piece’s affixes.`));
+    // per-affix enhancement sliders (rebuilt when the piece changes)
+    const enh = el('div', 'enhbox');
+    enh.id = `enh_${slot.key}`;
+    gc.appendChild(enh);
+    renderEnhSlot(slot);
   }
 
   gc.appendChild(el('p', 'hint',
-    'Pick up to 4 pieces (body / hand / 2 devices). Matching 3 pieces of a set activates its passive below; ' +
-    'enhance levels strengthen each piece’s affixes. Leave “none” for a no-gear baseline.'));
+    'Pick up to 4 pieces (body / hand / 2 devices). Matching 3 pieces of a set activates its passive below. ' +
+    'Each piece’s affixes are enhanced separately (0–3 per affix) — just like in-game, where you choose what to enhance; ' +
+    'affixes shown without a slider are the same at every stage. Leave “none” for a no-gear baseline.'));
 
   c.appendChild(gc);
 
   // --- target card ----------------------------------------------------------
   const tc = el('div', 'card');
-  tc.appendChild(el('h2', null, 'Target'));
+  tc.appendChild(el('h2', null, 'Target (mob)'));
 
-  const eSel = el('select');
-  eSel.id = 'enemySel';
-  const dummy = el('option', null, 'Test dummy — DEF 0 (sheet parity)');
-  dummy.value = 'dummy';
-  dummy.selected = state.enemyId === 'dummy';
-  eSel.appendChild(dummy);
-  for (const e of DATA.enemies.slice().sort((a, b) => a.name.localeCompare(b.name))) {
-    const o = el('option', null, enemyLabel(e));
-    o.value = e.id;
-    o.selected = e.id === state.enemyId;
-    eSel.appendChild(o);
-  }
-  tc.appendChild(ctlRow('Target', eSel, 'Who you are fighting. The dummy (DEF 0) matches the reference spreadsheet.'));
-
-  tc.appendChild(range('enemyLv', 'Target level', 1, 120, state.enemyLv,
-    'Target level (1–120). Raises the target’s DEF.').wrap);
+  tc.appendChild(numInput('mobDef', 'Mob DEF', state.mobDef, 1,
+    'Defense of the mob you are fighting (0 = no mitigation, like the test dummy). ' +
+    'Damage is scaled by 100/(DEF+100). Type any value from the game — no enemy presets needed.').wrap);
   tc.appendChild(numInput('resist', 'Elemental resistance %', state.resist, 1,
     'Target’s resistance to your element (0–100). Reduces your damage accordingly.').wrap);
   tc.appendChild(numInput('dmgBonus', 'Extra damage bonus %', state.dmgBonus, 1,
@@ -380,27 +547,21 @@ function renderControls() {
   opLv.el.oninput = () => {
     state.opLv = +opLv.el.value;
     opLv.render();
-    renderControls(); // gear availability depends on operator level
+    updateGearLocks(); // gear availability depends on operator level (in place: drag-safe)
     re();
   };
-  skLv.el.oninput = () => { state.skillLv = +skLv.el.value; skLv.render(); re(); };
-  wSel.onchange = () => { state.weaponId = wSel.value; re(); };
+  wSel.onchange = () => { state.weaponId = wSel.value; renderControls(); re(); };
   $('weaponLv').oninput = () => { state.weaponLv = +$('weaponLv').value; $('weaponLvV').textContent = state.weaponLv; re(); };
-  $('potLv').oninput = () => { state.potLv = +$('potLv').value; $('potLvV').textContent = state.potLv; re(); };
   for (const slot of SLOTS) {
     $(`slot_${slot.key}`).onchange = () => {
       const v = $(`slot_${slot.key}`).value;
-      state.gear[slot.key] = v ? { id: v, en: state.gear[slot.key]?.en ?? 0 } : null;
-      $(`en_${slot.key}`).disabled = !v;
-      re();
-    };
-    $(`en_${slot.key}`).onchange = () => {
-      if (state.gear[slot.key]) state.gear[slot.key].en = +$(`en_${slot.key}`).value;
+      // switching pieces resets per-affix stages (fresh piece, stage 0 each)
+      state.gear[slot.key] = v ? { id: v, en: {} } : null;
+      renderEnhSlot(slot);
       re();
     };
   }
-  eSel.onchange = () => { state.enemyId = eSel.value; re(); };
-  $('enemyLv').oninput = () => { state.enemyLv = +$('enemyLv').value; $('enemyLvV').textContent = state.enemyLv; re(); };
+  bindNum('mobDef');
   bindNum('resist');
   bindNum('dmgBonus');
   bindNum('dmgReduction');
@@ -408,7 +569,9 @@ function renderControls() {
 }
 
 function gcSlotOptgroup(sel, label) {
-  sel.appendChild(el('optgroup', null, label));
+  const og = el('optgroup');
+  og.label = label;
+  sel.appendChild(og);
 }
 
 // ---------------------------------------------------------------------------
@@ -532,16 +695,22 @@ function renderResults() {
     row.appendChild(el('span', 'v', String(v)));
     sg.appendChild(row);
   };
-  add('Base ATK', `${op.atk} + ${fmt(build.weaponAtk)}${build.potentialAtk ? ` + ${fmt1(build.potentialAtk)}` : ''}${build.suitPct.flat ? ` + ${fmt(build.suitPct.flat)} (set)` : ''}`);
-  add('ATK %', `${fmt1(build.suitPct.atk + g.atkPct)}%`);
-  add(`Main (${op.mainAttrName})`, `${fmt1(build.mainTotal)}${build.mainTotal !== op.mainValue ? ' (incl. gear)' : ''}`);
-  add(`Sub (${op.subAttrName})`, `${fmt1(build.subTotal)}${build.subTotal !== op.subValue ? ' (incl. gear)' : ''}`);
+  add('Base ATK', `${op.atk} + ${fmt1(build.weaponAtk)}${build.essAtkFlat ? ` + ${fmt1(build.essAtkFlat)} (essence)` : ''}${build.suitPct.flat ? ` + ${fmt(build.suitPct.flat)} (set)` : ''}`);
+  add('ATK %', `${fmt1(build.suitPct.atk + g.atkPct + build.essAtkPct)}%${build.essAtkPct ? ` (incl. ${fmt1(build.essAtkPct)}% essence)` : ''}`);
+  add(`Main (${op.mainAttrName})`, `${fmt1(build.mainTotal)}${build.mainTotal !== op.mainValue ? ' (incl. gear/pot/essence)' : ''}`);
+  add(`Sub (${op.subAttrName})`, `${fmt1(build.subTotal)}${build.subTotal !== op.subValue ? ' (incl. gear/pot/essence)' : ''}`);
   add('Stat bonus', `× ${fmt(build.statBonus, 4)}`);
-  add('Weapon', `${build.weapon ? build.weapon.name : '—'} (Lv ${state.weaponLv}${state.potLv ? `, pot ${state.potLv}` : ''})`);
+  add('Weapon', `${build.weapon ? build.weapon.name : '—'} (Lv ${state.weaponLv})`);
+  const essParts = [];
+  for (const [name, rank] of [['Main', state.essRanks.main], ['Sub', state.essRanks.sub], ['Skill', state.essRanks.skill]]) {
+    if (rank > 0) essParts.push(`${name} R${rank}`);
+  }
+  if (essParts.length) add('Essence', essParts.join(' · '), true);
+  add('Operator potential', state.pot > 0 ? `P${state.pot}` : '—');
   add('HP', fmt(op.hp));
   add('DEF', fmt(op.def));
-  add('Crit rate', `${fmt1(build.critRate)}%${build.critRate !== op.critRate ? ' (incl. gear)' : ''}`);
-  add('Crit damage', `${fmt1(build.critDmg)}%${build.critDmg !== op.critDmg ? ' (incl. gear)' : ''}`);
+  add('Crit rate', `${fmt1(build.critRate)}%${build.critRate !== op.critRate ? ' (incl. pot/essence/gear)' : ''}`);
+  add('Crit damage', `${fmt1(build.critDmg)}%${build.critDmg !== op.critDmg ? ' (incl. pot/essence/gear)' : ''}`);
   card.appendChild(sg);
   r.appendChild(card);
 
@@ -557,33 +726,26 @@ function renderResults() {
       const it = sel ? DATA.equipment.items[sel.id] : null;
       const g2 = el('div', 'statrow');
       g2.appendChild(el('span', 'k', slot.name));
-      g2.appendChild(el('span', 'v', it ? `${it.name}${sel.en ? ` +${sel.en}` : ''}` : '—'));
+      g2.appendChild(el('span', 'v', it ? `${it.name}${enSummaryText(sel, it)}` : '—'));
       glist.appendChild(g2);
     }
     gcard.appendChild(glist);
 
     // aggregate affix lines (skip the six taken-scalar keys: shown as one product)
     const affRows = [];
-    const TAKEN = ['4', '5', '6', '7', '48', '60'];
     const seenKeys = {};
     for (const slot of SLOTS) {
       const sel = state.gear[slot.key];
       if (!sel) continue;
       const it = DATA.equipment.items[sel.id];
-      const st = it?.st?.[Math.min(3, Math.max(0, sel.en | 0))] ?? {};
+      const st = it ? pieceStats(sel, it) : {};
       for (const [t, v] of Object.entries(st)) {
-        if (TAKEN.includes(t)) continue;
+        if (TAKEN_KEYS.includes(t) || t === DEF_KEY) continue;
         seenKeys[t] = (seenKeys[t] ?? 0) + v;
       }
     }
     for (const [t, v] of Object.entries(seenKeys)) {
-      const label = affixLabel(t);
-      let val;
-      if (t === '0fm' || t === '0fs') val = `+${v} pts`;
-      else if (t === '0pm' || t === '0ps') val = `+${(v * 100).toFixed(1)}%`;
-      else if (v < 1 && [2, 9, 10, 50, 51, 52, 53, 54, 17, 28, 29, 32, 33, 44, 61, 87].includes(+t)) val = `+${(v * 100).toFixed(1)}%`;
-      else val = `+${fmt(v, 2)}`;
-      affRows.push(`${label} <b>${val}</b>`);
+      affRows.push(`${affixLabel(t)} <b>${affixValueText(t, v)}</b>`);
     }
     if (g.takenMult !== 1) affRows.push(`Final DMG reduction <b>×${g.takenMult.toFixed(3)}</b>`);
     if (g.elemBonusPct) {
@@ -615,21 +777,26 @@ function renderResults() {
   };
 
   const tcard = el('div', 'card');
-  tcard.appendChild(el('h2', null, `Damage per skill — skill Lv ${state.skillLv}, target DEF ${fmt(enemyDef())}`));
+  const lvVals = Object.values(state.skillLv);
+  const lvTxt = !lvVals.length ? '12 (default)'
+    : lvVals.every((v) => v === lvVals[0]) ? `${lvVals[0]}` : 'mixed (per tree)';
+  tcard.appendChild(el('h2', null, `Damage per skill — Lv ${lvTxt}, target DEF ${fmt(state.mobDef)}`));
   const table = document.createElement('table');
   table.innerHTML =
     '<thead><tr><th>Skill</th><th>Hits</th><th>Scale</th><th>Base</th><th>Min</th><th>Avg</th><th>Max</th></tr></thead>';
   const tbody = document.createElement('tbody');
   let totMin = 0, totAvg = 0, totMax = 0, totBase = 0;
   const rowsHtml = [];
+  const eh = build.extraHit || 0; // essence extra-hit scale: added once per cast
   for (const s of skills) {
-    const res = calcHit({ ...tgt, scales: s.scales });
+    const scales = eh ? [...s.scales, eh] : s.scales;
+    const res = calcHit({ ...tgt, scales });
     totMin += res.min; totAvg += res.avg; totMax += res.max; totBase += res.base;
     const name = s.name + (s.passive ? ' <span class="sub">passive</span>' : '');
-    const scale = s.scales.length ? s.scales.reduce((a, b) => a + b, 0) : 0;
+    const scale = scales.length ? scales.reduce((a, b) => a + b, 0) : 0;
     const hits = s.hit ? `${s.hit} hit${s.hit > 1 ? 's' : ''}` : '—';
     rowsHtml.push(
-      `<tr><td>${name}</td><td>${hits}</td><td>${(scale * 100).toFixed(1)}%</td>` +
+      `<tr><td>${name}</td><td>${hits}</td><td>${(scale * 100).toFixed(1)}%${eh ? ' <span class="sub">incl. extra hit</span>' : ''}</td>` +
       `<td>${fmt(res.base)}</td><td>${fmt(res.min)}</td><td>${fmt(res.avg)}</td><td>${fmt(res.max)}</td></tr>`
     );
   }
@@ -652,7 +819,7 @@ function renderResults() {
   win.id = 'winSecs';
   win.min = 1;
   win.max = 60;
-  win.step = 1;
+  win.step = 0.1;
   win.value = state.windowSecs;
   win.oninput = () => {
     state.windowSecs = +win.value;
@@ -693,9 +860,10 @@ function addTeamMember() {
   if (!cur) return;
   const { op, gear, build } = cur;
   const tp = targetParams();
+  const eh = build.extraHit || 0;
   const skills = numberSkills(operatorSkills(DATA.skills, op.id, state.skillLv))
-    .filter((s) => s.scales.length)
-    .map((s) => ({ id: s.id, label: s.name, hit: s.hit, scales: s.scales }));
+    .filter((s) => s.scales.length || eh)
+    .map((s) => ({ id: s.id, label: s.name, hit: s.hit, scales: eh ? [...s.scales, eh] : s.scales }));
   state.team.push({
     key: Date.now() + Math.random(),
     opId: op.id,
@@ -703,8 +871,8 @@ function addTeamMember() {
     atk: build.finalAttack,
     critRate: build.critRate,
     critDmg: build.critDmg,
-    // member-specific: element bonus + active set passives (snapshot)
-    elemSetPct: gear.elemBonusPct + build.suitPct.dmg,
+    // member-specific: element bonus + active set passives + essence (snapshot)
+    elemSetPct: gear.elemBonusPct + build.suitPct.dmg + build.essDmgPct,
     takenMult: tp.damageTakenMult,
     skills,
     seq: [],
@@ -742,9 +910,9 @@ function renderTeam(r, /* unused; team recomputes target itself */ _tgt) {
   const card = el('div', 'card');
   card.appendChild(el('h2', null, 'Team (skill sequences)'));
   card.appendChild(el('p', 'hint',
-    '“Add current build” snapshots the operator above (level, weapon, gear) as a team member. ' +
+    '“Add current build” snapshots the operator above (level, skill trees, weapon, essence, potential, gear) as a team member. ' +
     'Add skills to each member’s sequence in cast order — totals combine every hit, crits included. ' +
-    'Target settings (target, level, resistance, staggered, global bonus) are shared across all members.'));
+    'Target settings (DEF, resistance, staggered, global bonus) are shared across all members.'));
 
   const btn = el('button', 'btn', 'Add current build to team');
   btn.title = 'Snapshot the operator, weapon, gear and target above as a new team member';
@@ -813,7 +981,7 @@ function renderTeam(r, /* unused; team recomputes target itself */ _tgt) {
     win.type = 'range';
     win.min = 1;
     win.max = 120;
-    win.step = 1;
+    win.step = 0.1;
     win.value = state.teamWindow;
     win.oninput = () => { state.teamWindow = +win.value; renderResults(); };
     wrow.appendChild(wl);
