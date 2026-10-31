@@ -13,7 +13,8 @@ A **truly free** (no signup, no subscription) damage calculator for
 
 ## Features
 
-- Operator + weapon + potential picker (weapon list filters by weapon type)
+- Operator + weapon + potential picker (weapon list auto-narrows to the
+  operator's weapon type, grouped by star count, [BP]/[SIG] tagged)
 - Every picker (operator, weapon, 4 gear slots) is a **searchable
   combobox**: the full grouped list stays visible and you can also type
   to filter it down as you type

@@ -585,25 +585,27 @@ function renderControls() {
   wc.appendChild(el('h2', null, 'Weapon'));
 
   // empty state.weaponId means "the operator's default weapon"
-  const effWeaponId = state.weaponId || operatorById(state.opId)?.defaultWeapon || '';
-  // all weapons, grouped by weapon type (rarity is shown per item, so the
-  // old per-rarity groups were replaced by type groups)
-  const byType = {};
+  const curOp = operatorById(state.opId);
+  const effWeaponId = state.weaponId || curOp?.defaultWeapon || '';
+  // an operator can only wield weapons of their own type — so the list is
+  // pre-filtered to that type and grouped by star count (highest stars first)
+  const byRarity = {};
   for (const w of DATA.weapons.weapons) {
-    (byType[w.typeName || 'Other'] ||= []).push(w);
+    if (curOp && w.typeName !== curOp.weaponTypeName) continue;
+    (byRarity[w.rarity || 0] ||= []).push(w);
   }
   const wItems = [];
-  for (const tn of Object.keys(byType).sort()) {
-    for (const w of byType[tn].sort((a, b) =>
-      (b.rarity || 0) - (a.rarity || 0) || a.name.localeCompare(b.name))) {
+  for (const r of Object.keys(byRarity).sort((a, b) => b - a)) {
+    for (const w of byRarity[r].sort((a, b) => a.name.localeCompare(b.name))) {
       const tag = w.origin === 'bp' ? ' [BP]' : w.origin === 'sig' ? ' [SIG]' : '';
-      wItems.push({ value: w.id, text: `${'★'.repeat(w.rarity || 0)} ${w.name}${tag}`, group: tn });
+      wItems.push({ value: w.id, text: `${'★'.repeat(r)} ${w.name}${tag}`, group: '★'.repeat(r) });
     }
   }
   wc.appendChild(combo({
     label: 'Weapon',
-    tip: 'All weapons, grouped by type — start typing to search by name. ★ = rarity; ' +
-      '[BP] = battle-pass weapon, [SIG] = signature (paid gacha) weapon.',
+    tip: `Weapons of this operator's ${curOp?.weaponTypeName || 'own'} type only, grouped by ` +
+      '★ count (highest first) — start typing to search by name. [BP] = battle-pass weapon, ' +
+      '[SIG] = signature (paid gacha) weapon.',
     items: wItems,
     selected: effWeaponId,
     onChange: (v) => { state.weaponId = v; renderControls(); re(); },
