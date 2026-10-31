@@ -302,7 +302,7 @@ test('skill scale sums (Laevatain, skill level 12, current dump)', () => {
   closeTo(sum('chr_0016_laevat_normal_skill_during_ult'), 16.0, 0.0005, 'during ult');
   closeTo(sum('chr_0016_laevat_combo_skill'), 5.4, 0.0005, 'combo');
   closeTo(sum('chr_0016_laevat_ultimate_skill'), 6.08, 0.0005, 'ultimate');
-  closeTo(sum('chr_0016_laevat_power_attack'), 9.0, 0.0005, 'heavy');
+  closeTo(sum('chr_0016_laevat_power_attack'), 9.0, 0.0005, 'finisher');
 });
 
 test('operatorSkills: per-tree level map (missing trees default to 12)', () => {

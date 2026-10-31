@@ -236,8 +236,11 @@ function gearAffixPreview(item) {
 // a single slider. Affixes outside any enhanceable slot (fixed at every
 // stage, or the six taken-scalars / DEF that are summarized in the gear
 // results) are shown as fixed lines.
-function renderEnhSlot(slot) {
-  const box = $(`enh_${slot.key}`);
+function renderEnhSlot(slot, givenBox) {
+  // the card may not be attached to the document yet (renderControls builds
+  // it before appending), so callers pass the box element explicitly; the id
+  // lookup is kept only as a fallback
+  const box = givenBox || $(`enh_${slot.key}`);
   if (!box) return;
   box.innerHTML = '';
   const sel = state.gear[slot.key];
@@ -550,10 +553,10 @@ function renderControls() {
 
   // three level trees, exactly as in-game: every operator can only level up
   // Basic Attack, Battle Skill (incl. the combo/follow-up skills) and the
-  // Ultimate. All other damage rows (dash/plunge/heavy hits, during-ult
+  // Ultimate. All other damage rows (dive/finisher hits, during-ult
   // variants, ult follow-up hits) ride on one of these three.
   const TREES = [
-    ['basic', 'Basic Attack', 'all basic hits — light/heavy chain, dash, plunge, and during-ult basics'],
+    ['basic', 'Basic Attack', 'all basic hits — light/heavy chain, dive, finisher, and during-ult basics'],
     ['skill', 'Battle Skill', 'the battle skill plus its combo/follow-up hits'],
     ['ult', 'Ultimate', 'the ultimate plus its follow-up hits'],
   ];
@@ -661,7 +664,7 @@ function renderControls() {
       onChange: (v) => {
         // switching pieces resets per-affix stages (fresh piece, stage 0 each)
         state.gear[slot.key] = v ? { id: v, en: {} } : null;
-        renderEnhSlot(slot);
+        renderEnhSlot(slot, enh);
         re();
       },
     });
@@ -672,7 +675,7 @@ function renderControls() {
     const enh = el('div', 'enhbox');
     enh.id = `enh_${slot.key}`;
     gc.appendChild(enh);
-    renderEnhSlot(slot);
+    renderEnhSlot(slot, enh);
   }
 
   gc.appendChild(el('p', 'hint',
@@ -759,9 +762,8 @@ function kindRank(kind) {
   const base = String(kind).split(' (')[0];
   const rank = {
     'Basic Hit': 0,
-    'Dash Attack': 1,
-    'Falling Attack': 2,
-    'Heavy Attack': 3,
+    'Dive Attack': 2,
+    'Finisher': 3,
     'Battle Skill': 4,
     'Combo': 5,
     'Ultimate': 6,
@@ -1035,8 +1037,52 @@ function addTeamMember() {
     takenMult: tp.damageTakenMult,
     skills,
     seq: [],
+    // full copy of the panel's build inputs, so the member can be reopened
+    // and edited later (shared target fields are intentionally excluded)
+    buildState: snapshotBuildState(),
   });
   renderResults();
+}
+
+// Clones the panel's build inputs — everything the snapshot above depends on.
+// Cloned in both directions so panel edits never mutate a member's saved build.
+function snapshotBuildState() {
+  const gear = {};
+  for (const s of SLOTS) {
+    const g = state.gear[s.key];
+    gear[s.key] = g ? { id: g.id, en: { ...g.en } } : null;
+  }
+  return {
+    opId: state.opId,
+    opLv: state.opLv,
+    weaponId: state.weaponId,
+    weaponLv: state.weaponLv,
+    pot: state.pot,
+    skillLv: { ...state.skillLv },
+    essRanks: { ...state.essRanks },
+    gear,
+  };
+}
+
+// Restores a team member's build into the panel so it can be inspected and
+// edited; “Add current build to team” then snapshots the edited version.
+function loadMemberBuild(bs) {
+  if (!bs) return;
+  state.opId = bs.opId;
+  state.opLv = bs.opLv;
+  state.weaponId = bs.weaponId;
+  state.weaponLv = bs.weaponLv;
+  state.pot = bs.pot;
+  state.skillLv = { ...bs.skillLv };
+  state.essRanks = { ...bs.essRanks };
+  state.gear = {};
+  for (const s of SLOTS) {
+    const g = bs.gear && bs.gear[s.key];
+    state.gear[s.key] = g ? { id: g.id, en: { ...g.en } } : null;
+  }
+  renderControls();
+  renderResults();
+  $('controls').scrollIntoView({ behavior: 'smooth' });
 }
 
 function memberTotals(m) {
@@ -1070,6 +1116,7 @@ function renderTeam(r, /* unused; team recomputes target itself */ _tgt) {
   card.appendChild(el('h2', null, 'Team (skill sequences)'));
   card.appendChild(el('p', 'hint',
     '“Add current build” snapshots the operator above (level, skill trees, weapon, essence, potential, gear) as a team member. ' +
+    'Click a member’s name to load that build back into the controls panel for editing. ' +
     'Add skills to each member’s sequence in cast order — totals combine every hit, crits included. ' +
     'Target settings (DEF, resistance, staggered, global bonus) are shared across all members.'));
 
@@ -1087,9 +1134,15 @@ function renderTeam(r, /* unused; team recomputes target itself */ _tgt) {
       teamMin += tot.min; teamAvg += tot.avg; teamMax += tot.max;
 
       const box = el('div', 'member');
-      box.appendChild(el('div', 'memberhead',
-        `<b>${m.name}</b> <span class="tag">FA ${fmt(m.atk, 1)}</span>` +
-        `<span class="tag">${fmt(tot.avg)} avg / ${m.seq.length} casts</span>`));
+      const head = el('div', 'memberhead');
+      const nameBtn = el('button', 'membername');
+      nameBtn.textContent = m.name;
+      nameBtn.title = 'Open this member’s build in the controls panel — edit it there, then “Add current build to team” snapshots the changes';
+      nameBtn.onclick = () => loadMemberBuild(m.buildState);
+      head.appendChild(nameBtn);
+      head.appendChild(el('span', 'tag', `FA ${fmt(m.atk, 1)}`));
+      head.appendChild(el('span', 'tag', `${fmt(tot.avg)} avg / ${m.seq.length} casts`));
+      box.appendChild(head);
 
       const addRow = el('div', 'memberadd');
       const mmLbl = el('label', 'mmlabel', 'Cast skill');

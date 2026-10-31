@@ -403,10 +403,12 @@ function classifySkill(sid) {
   if (m) return { kind: m[1] ? 'Combo Skill (' + m[1] + ')' : 'Combo Skill', hit: '' };
   m = tail.match(/^ult_attack(\d*)(_end|_\d+)?$/);
   if (m) return { kind: m[2] === '_end' ? 'Ult Finisher' : 'Ult Hit', hit: m[1] || '' };
-  if (/^plunging_attack/.test(tail)) return { kind: 'Falling Attack', hit: '' };
+  if (/^plunging_attack/.test(tail)) return { kind: 'Dive Attack', hit: '' };
   m = tail.match(/^power_?attack(\d*)$/);
-  if (m) return { kind: 'Heavy Attack', hit: m[1] };
-  if (tail === 'dash_attack') return { kind: 'Dash Attack', hit: '' };
+  if (m) return { kind: 'Finisher', hit: m[1] };
+  // "dash_attack" has no in-game counterpart — in the client, dashing is pure
+  // evasion (stamina cost, perfect-dodge SP). The dump row is dead data.
+  if (tail === 'dash_attack') return null;
   m = tail.match(/^attack(\d*)(_\d+)?$/);
   if (m) return { kind: 'Basic Hit', hit: m[1] || '' };
   if (/^reaction/.test(tail)) return { kind: 'Reaction', hit: '' };
@@ -414,7 +416,7 @@ function classifySkill(sid) {
 }
 // In-game, each operator has exactly THREE levelable skill trees — Basic
 // Attack, Battle Skill (includes the combo/follow-up skills) and Ultimate.
-// Every other skill row (dash/plunge/heavy hits, during-ult variants, ult
+// Every other skill row (dive/finisher hits, during-ult variants, ult
 // follow-up hits) rides on one of those trees. The grouping is read from the
 // level-1 icon (icon_attack_* / icon_skill_* / icon_combo_skill_* /
 // icon_ultimate_skill_*) disambiguated by the id tail: "ult_attack*" rows
@@ -452,6 +454,7 @@ const skillList = [];
 for (const [sid, s] of Object.entries(skillPatch)) {
   if (!sid.startsWith('chr_')) continue;
   const c = classifySkill(sid);
+  if (!c) continue; // no in-game counterpart (dash_attack dead rows)
   if (c.unknown) note(`unrecognized skill tail: ${sid}`);
   const opId = sid.split('_').slice(0, 3).join('_');
   const ic = (s.SkillPatchDataBundle?.[0]?.iconId) || '';
