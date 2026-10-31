@@ -29,7 +29,6 @@
 //                defaultWeapon, levels:[{b,a:[hp,atk,def,critRate,critDmg,str,agi,wis,will]}]}]
 //   weapons:   {curves:{id:[[lv,atk]]}, weapons:[{id,name,rarity,typeName,curve,...}]}
 //   skills:    [{id,op,kind,hit,passive,damage,levels:[{lv,scales,poise,atb,cd,display,bb}]}]
-//   enemies:   [{id,name,base,dummy,levels:[{lv,def}],res}]
 //   traits:    {traitDefs:{}, potentialSkills:{id:[{lv,bb}]}}
 //   equipment: {items:{id:{name,tier,slot,suit,minLv,st:[4×{attrType:value}]}},
 //               suits:{id:{name,req:[{cnt,skill,bb}]}}}
@@ -230,6 +229,7 @@ export function operatorAtLevel(operators, opId, lvl) {
     subValue,
     statBonus: statBonusMultiplier(mainValue, subValue),
     defaultWeapon: op.defaultWeapon,
+    potential: op.potential || [],
     hp,
     atk,
     def,
@@ -248,17 +248,26 @@ export function weaponAtk(weapons, weaponId, lvl) {
   return row ? row[1] : 0;
 }
 
-/** All damage skills of an operator with their scales at skill level (1-12+). */
+/**
+ * All damage skills of an operator with their scales.
+ * The in-game leveling has three trees — Basic Attack, Battle Skill (incl.
+ * combo/follow-ups) and Ultimate — so `skillLv` is either a single level
+ * (1-12) applied to every tree, or a map of tree -> level
+ * ({basic, skill, ult}; missing trees default to 12).
+ */
 export function operatorSkills(skills, opId, skillLv = 12) {
+  const lvOf = (s) =>
+    (skillLv && typeof skillLv === 'object') ? (skillLv[s.tree] ?? 12) : (skillLv ?? 12);
   return skills
     .filter((s) => s.op === opId && s.damage)
     .map((s) => {
-      const row = s.levels.find((r) => r.lv === skillLv) ?? s.levels[s.levels.length - 1];
+      const row = s.levels.find((r) => r.lv === lvOf(s)) ?? s.levels[s.levels.length - 1];
       return {
         id: s.id,
         kind: s.kind,
         name: s.kind, // UI may number duplicates by display order
         hit: s.hit,
+        tree: s.tree,
         passive: s.passive,
         scales: row ? row.scales : [],
         cd: row?.cd ?? null,
@@ -266,16 +275,6 @@ export function operatorSkills(skills, opId, skillLv = 12) {
         poise: row?.poise ?? null,
       };
     });
-}
-
-/** Enemy preset row at level (falls back to nearest available). */
-export function enemyAtLevel(enemies, id, lvl) {
-  const e = enemies.find((x) => x.id === id);
-  if (!e) return null;
-  const row =
-    e.levels.find((r) => r.lv === lvl) ??
-    e.levels.reduce((best, r) => (Math.abs(r.lv - lvl) < Math.abs(best.lv - lvl) ? r : best), e.levels[0]);
-  return { id: e.id, name: e.name, dummy: e.dummy, level: row.lv, def: row.def, res: e.res };
 }
 
 // ---------------------------------------------------------------------------
@@ -295,8 +294,11 @@ export const ELEMENT_ATTR = {
  * Aggregate the four equipped pieces into one contribution object.
  *
  * `equipment` = the data/equipment.json bundle ({items, suits}).
- * `gear` = { body, hand, d1, d2 } where each is null or {id, en} (enhance
- *           level 0-3).
+ * `gear` = { body, hand, d1, d2 } where each is null or {id, en}.
+ *           `en` is either a uniform enhance stage 0-3 (number) or a
+ *           per-affix stage map {affixKey: 0-3} — each affix the piece has
+ *           can be enhanced independently (as in-game); keys missing from
+ *           the map default to stage 0.
  * `element` = the operator's element ('Physical', 'Fire', ...) — only the
  *              matching elemental increase affix applies to damage.
  *
@@ -345,7 +347,20 @@ export function gearContribution(equipment, gear, element) {
     if (!g?.id) continue;
     const item = equipment?.items?.[g.id];
     if (!item) continue;
-    const st = item.st[Math.min(3, Math.max(0, g.en | 0))] ?? {};
+    // per-affix enhancement: each affix key is read at its own stage. The
+    // union of keys across all stages is iterated (dump order is preserved
+    // because the affix set is identical at every stage of a piece).
+    const keys = [];
+    {
+      const seen = new Set();
+      for (const s of item.st) for (const k of Object.keys(s)) {
+        if (!seen.has(k)) { seen.add(k); keys.push(k); }
+      }
+    }
+    const isMap = typeof g.en === 'object' && g.en !== null;
+    const stageOf = (k) => Math.min(3, Math.max(0, (isMap ? g.en[k] : g.en) | 0));
+    const st = {};
+    for (const k of keys) st[k] = item.st[stageOf(k)][k];
     for (const [t, v] of Object.entries(st)) {
       if (v == null) continue;
       // Main/Sub attribute pseudo-keys (attrType 0, disambiguated in the
@@ -387,28 +402,41 @@ export function gearContribution(equipment, gear, element) {
 
 const EFF_NAMES = { 17: 'Normal ATK efficiency', 28: 'Ult efficiency', 32: 'Normal skill efficiency', 33: 'Combo skill efficiency' };
 
-/**
- * Flat ATK granted by the weapon's potential skill at potential level (0-9).
- * Potential skill ids in the bundle are 'sk_' + weaponId (e.g. weapon
- * 'wpn_sword_0003' -> 'sk_wpn_sword_0003'); the bonus is stored per level
- * as bb.atk_up (some weapons grant other effects instead — those return 0
- * here and can be surfaced separately by the UI).
- */
-export function weaponPotentialAtk(traits, weaponId, potLv = 0) {
-  const rows = weaponId && traits?.potentialSkills ? traits.potentialSkills['sk_' + weaponId] : undefined;
-  if (!rows || !rows.length || potLv <= 0) return 0;
-  let bestLv = 0;
-  for (const r of rows) if (r.lv <= potLv && r.lv > bestLv) bestLv = r.lv;
-  const row = rows.find((r) => r.lv === bestLv);
-  return row?.bb?.atk_up ?? 0;
-}
+// ---------------------------------------------------------------------------
+// Full-build resolver
+// ---------------------------------------------------------------------------
+
+// engine element code -> essence bundle elemental-DMG key
+const ESSENCE_ELEM_KEY = {
+  Physical: 'elemPhy', Fire: 'elemFire', Pulse: 'elemPulse', Cryst: 'elemCryst', Natural: 'elemNature',
+};
 
 /**
  * Resolve the full attack stack for an operator build.
- * Returns { op, weaponId, weapon, weaponAtk, potentialAtk, flatAtk, atkPct,
- *           gear, mainTotal, subTotal, critDmg, finalAttack, statBonus,
- *           suitPct: {atk, dmg} }.
+ * Returns { op, weaponId, weapon, weaponAtk, essAtkFlat, essAtkPct,
+ *           essDmgPct, extraHit, potGain: {main, sub, crit},
+ *           mainTotal, subTotal, critRate, critDmg, finalAttack, statBonus,
+ *           suitPct: {atk, dmg, crit, flat} }.
  * `weaponId` falls back to the operator's default weapon when omitted.
+ * `pot` (0-5) folds operator potential tiers 0..pot-1: attribute flats that
+ * match the operator's main/sub join that value before the stat bonus
+ * multiplier, `{cr}` fractions add to crit rate; other attributes and
+ * info-only tiers are display-only (the UI renders them).
+ * `essRanks` ({main, sub, skill}: 0-9) folds weapon essence (gem) ranks —
+ * rank N is slot.ranks[N-1] (absolute values, so no cumulation):
+ *   main / attr39..42  wielder-main / raw attribute flats, bucketed by the
+ *                      operator's main/sub codes, before the stat multiplier
+ *   atkPct / atkUp     additive ATK % (atkUp <= 1); atkUp > 1 is flat ATK and
+ *                      joins the weapon ATK before ATK% (like gear flat ATK)
+ *   cr / cridmg        additive crit rate / crit damage %
+ *   dmgBonus / elem*   additive damage bonus % (elem* only for the operator's
+ *                      own element) — returned in essDmgPct for the caller to
+ *                      add to damageBonusPct in calcHit
+ *   primaryUp / secondUp / allUp  multiplicative, applied to the main/sub
+ *                      totals after the gear fractions
+ *   extraHit           extra-hit scale, added once per cast to each damage
+ *                      skill's scale sum by the caller (UI / team snapshot)
+ *   rest               unmapped info keys — skipped
  * `gear` is the output of gearContribution() — its flat ATK joins `flatAtk`,
  * its main stats join the operator's main/sub values before the stat bonus
  * multiplier, its crit damage joins the operator's total crit damage, and
@@ -418,17 +446,62 @@ export function weaponPotentialAtk(traits, weaponId, potLv = 0) {
  * the ATK % used for Final Attack, and `dmg_up` (fraction ×100) is returned
  * for the caller to add to `damageBonusPct` in calcHit.
  */
-export function buildAttack(operators, weapons, traits, opts = {}) {
-  const { opId, opLv = 90, weaponId, weaponLv = 90, potLv = 0, flatAtk = 0, atkPct = 0, gear = null } = opts;
+export function buildAttack(operators, weapons, opts = {}) {
+  const { opId, opLv = 90, weaponId, weaponLv = 90, pot = 0, essRanks = null, flatAtk = 0, atkPct = 0, gear = null } = opts;
   const op = operatorAtLevel(operators, opId, opLv);
   if (!op) return null;
   const wid = weaponId || op.defaultWeapon || '';
   const weapon = weapons.weapons.find((x) => x.id === wid) || null;
   const wpnAtk = weaponAtk(weapons, wid, weaponLv);
-  const potentialAtk = weaponPotentialAtk(traits, wid, potLv);
   const g = gear || {};
-  const mainTotal = (op.mainValue + (g.main?.[op.mainAttr] ?? 0) + (g.mainFlat ?? 0)) * (1 + (g.mainFrac ?? 0));
-  const subTotal = (op.subValue + (g.main?.[op.subAttr] ?? 0) + (g.subFlat ?? 0)) * (1 + (g.subFrac ?? 0));
+
+  // ---- operator potential (tiers 0..pot-1) ---------------------------------
+  let potMain = 0, potSub = 0, potCrit = 0;
+  for (const t of (op.potential || []).slice(0, Math.max(0, pot))) {
+    for (const a of t.attrs || []) {
+      if (a.attr == null) { potCrit += (a.cr || 0) * 100; continue; }
+      if (a.attr === op.mainAttr) potMain += a.flat;
+      else if (a.attr === op.subAttr) potSub += a.flat;
+      // attributes that are neither main nor sub are display-only
+    }
+  }
+
+  // ---- weapon essence (gem) ranks -------------------------------------------
+  let essMain = 0, essSub = 0, essAtkFlat = 0, essAtkPct = 0,
+      essCrit = 0, essCritDmg = 0, essDmgPct = 0, extraHit = 0,
+      essPrimary = 0, essSecond = 0, essAll = 0;
+  const elemKey = ESSENCE_ELEM_KEY[op.element];
+  for (const role of ['main', 'sub', 'skill']) {
+    const rank = Math.max(0, Math.min(9, essRanks?.[role] | 0 || 0));
+    const slot = weapon?.essence?.find((s) => s.role === role);
+    const r = slot && rank > 0 ? slot.ranks[rank - 1] : null;
+    if (!r) continue;
+    for (const [k, v] of Object.entries(r)) {
+      if (k === 'main') essMain += v;
+      else if (k >= 'attr39' && k <= 'attr42') {
+        const c = +k.slice(4);
+        if (c === op.mainAttr) essMain += v;
+        else if (c === op.subAttr) essSub += v;
+      }
+      else if (k === 'atkPct') essAtkPct += v * 100;
+      else if (k === 'atkUp') { if (v > 1) essAtkFlat += v; else essAtkPct += v * 100; }
+      else if (k === 'cr') essCrit += v * 100;
+      else if (k === 'cridmg') essCritDmg += v * 100;
+      else if (k === 'dmgBonus' || k === elemKey) essDmgPct += v * 100;
+      else if (k === 'primaryUp') essPrimary += v;
+      else if (k === 'secondUp') essSecond += v;
+      else if (k === 'allUp') essAll += v;
+      else if (k === 'extraHit') extraHit += v;
+      // elem keys for other elements and 'rest' are skipped
+    }
+  }
+
+  const mainTotal =
+    (op.mainValue + (g.main?.[op.mainAttr] ?? 0) + (g.mainFlat ?? 0) + potMain + essMain)
+    * (1 + (g.mainFrac ?? 0)) * (1 + essPrimary + essAll);
+  const subTotal =
+    (op.subValue + (g.main?.[op.subAttr] ?? 0) + (g.subFlat ?? 0) + potSub + essSub)
+    * (1 + (g.subFrac ?? 0)) * (1 + essSecond + essAll);
   // Set passives (gearContribution -> suitBonuses[].bb):
   //   dmg_up   fraction            -> additive damage bonus %
   //   atk_up   fraction (<=1)      -> ATK %; flat value (>1) -> flat ATK
@@ -442,10 +515,10 @@ export function buildAttack(operators, weapons, traits, opts = {}) {
     suitDmg += (bb.dmg_up ?? 0) * 100;
     suitCrit += (bb.crit_up ?? 0) * 100;
   }
-  const atkTotal = atkPct + suitAtk + (g.atkPct || 0);
+  const atkTotal = atkPct + suitAtk + (g.atkPct || 0) + essAtkPct;
   const fa = finalAttack({
     baseAtk: op.atk,
-    weaponAtk: wpnAtk + potentialAtk,
+    weaponAtk: wpnAtk + essAtkFlat,
     atkPct: atkTotal,
     flatAtk: flatAtk + (g.flatAtk || 0) + suitFlat,
     mainStat: mainTotal,
@@ -456,14 +529,18 @@ export function buildAttack(operators, weapons, traits, opts = {}) {
     weaponId: wid,
     weapon,
     weaponAtk: wpnAtk,
-    potentialAtk,
+    essAtkFlat,
+    essAtkPct,
+    essDmgPct,
+    extraHit,
+    potGain: { main: potMain, sub: potSub, crit: potCrit },
     flatAtk,
     atkPct,
     gear: g,
     mainTotal,
     subTotal,
-    critRate: op.critRate + suitCrit + (g.critRatePct || 0),
-    critDmg: op.critDmg + (g.critDmg || 0),
+    critRate: op.critRate + suitCrit + (g.critRatePct || 0) + potCrit + essCrit,
+    critDmg: op.critDmg + (g.critDmg || 0) + essCritDmg,
     finalAttack: fa,
     statBonus: statBonusMultiplier(mainTotal, subTotal),
     suitPct: { atk: suitAtk, dmg: suitDmg, crit: suitCrit, flat: suitFlat },

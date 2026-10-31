@@ -4,7 +4,8 @@
 // EndfieldData dump):
 //   Laevatain L90 (chr_0016_laevat): base ATK 318, WIS(main, 41) 177.985,
 //     STR(sub, 39) 121.374, CR 5%, CD bonus 0 (total 50).
-//   Tarr 11 (wpn_sword_0003) L90: ATK 283; potential lv1/lv9: +12 / +33.6.
+//   Tarr 11 (wpn_sword_0003) L90: ATK 283; essence R1/R9: +12 / +33.6 flat
+//   ATK (skill slot), main gem R9 adds +79 WIS (joins the main stat).
 //   Sheet "Base atk" 729 = 318 + 283 + 128 (gear flat).
 //   FA = 729 × (1 + 177.985×0.005 + 121.374×0.002) = 1,554.7186...
 //   Sheet Battle Skill row 17,206.8 = FA × avgCrit(1.025) × scale 10.7975.
@@ -25,7 +26,6 @@ import {
   anomalyMultiplier,
   operatorAtLevel,
   weaponAtk,
-  weaponPotentialAtk,
   operatorSkills,
   buildAttack,
   gearContribution,
@@ -36,7 +36,6 @@ const bundle = (name) => JSON.parse(readFileSync(join(ROOT, 'data', name), 'utf8
 const operators = bundle('operators.json');
 const weapons = bundle('weapons.json');
 const skills = bundle('skills.json');
-const traits = bundle('traits.json');
 const equipment = bundle('equipment.json');
 
 const closeTo = (actual, expected, tol, msg = '') =>
@@ -117,38 +116,103 @@ test('weaponAtk: Tarr 11 curve', () => {
   assert.equal(weaponAtk(weapons, 'wpn_nope', 90), 0);
 });
 
-test('weaponPotentialAtk: sword_0003 (Tarr 11)', () => {
-  assert.equal(weaponPotentialAtk(traits, 'wpn_sword_0003', 0), 0);
-  assert.equal(weaponPotentialAtk(traits, 'wpn_sword_0003', 1), 12);
-  assert.equal(weaponPotentialAtk(traits, 'wpn_sword_0003', 9), 33.6);
-  assert.equal(weaponPotentialAtk(traits, 'wpn_nope', 9), 0);
-  assert.equal(weaponPotentialAtk(undefined, 'wpn_sword_0003', 9), 0);
+test('weapons: every weapon has an origin; bundle split is 13 bp / 17 sig / 54 std', () => {
+  const list = weapons.weapons;
+  assert.ok(list.length >= 80, `bundle should hold ~84 weapons, got ${list.length}`);
+  const bad = list.filter((w) => !['bp', 'sig', 'std'].includes(w.origin));
+  assert.equal(bad.length, 0, `weapons with missing/unknown origin: ${bad.map((w) => w.id).join(', ')}`);
+  const bp = list.filter((w) => w.origin === 'bp').length;
+  const sig = list.filter((w) => w.origin === 'sig').length;
+  const std = list.filter((w) => w.origin === 'std').length;
+  assert.equal(bp, 13, `bp count ${bp}`);
+  assert.equal(sig, 17, `sig count ${sig}`);
+  assert.equal(std, 54, `std count ${std}`);
+  assert.equal(bp + sig + std, list.length, 'origins partition the whole bundle');
 });
 
-test('buildAttack: full Laevatain build (no potential, sheet-flat gear)', () => {
-  const b = buildAttack(operators, weapons, traits, {
+test('buildAttack: Tarr 11 essence ranks (skill slot atkUp, main slot WIS)', () => {
+  const r0 = buildAttack(operators, weapons, {
+    opId: 'chr_0016_laevat', opLv: 90, weaponId: 'wpn_sword_0003',
+    essRanks: { main: 0, sub: 0, skill: 0 },
+  });
+  closeTo(r0.finalAttack, 1281.7, 0.05, 'no-essence anchor');
+  assert.equal(r0.essAtkFlat, 0);
+
+  const r1 = buildAttack(operators, weapons, {
+    opId: 'chr_0016_laevat', opLv: 90, weaponId: 'wpn_sword_0003',
+    essRanks: { main: 1, sub: 0, skill: 1 },
+  });
+  closeTo(r1.essAtkFlat, 12, 1e-9, 'skill R1 atkUp 12 -> flat weapon ATK');
+  closeTo(r1.finalAttack, 1338.0, 0.05, 'essence R1 anchor');
+
+  const r9 = buildAttack(operators, weapons, {
+    opId: 'chr_0016_laevat', opLv: 90, weaponId: 'wpn_sword_0003',
+    essRanks: { main: 9, sub: 0, skill: 9 },
+  });
+  closeTo(r9.essAtkFlat, 33.6, 1e-9, 'skill R9 atkUp 33.6');
+  closeTo(r9.mainTotal, 177.985 + 79, 1e-9, 'main R9 {main:79} -> +79 WIS');
+  closeTo(r9.finalAttack, 1604.1, 0.05, 'essence R9 anchor');
+});
+
+test('buildAttack: operator potential tiers (Laevatain P2, Wulfgard P1, Yvonne P2)', () => {
+  const l0 = buildAttack(operators, weapons, { opId: 'chr_0016_laevat', opLv: 90 });
+  closeTo(l0.finalAttack, 1281.7, 0.05, 'no-potential anchor');
+
+  const l2 = buildAttack(operators, weapons, { opId: 'chr_0016_laevat', opLv: 90, pot: 2 });
+  assert.deepEqual(l2.potGain, { main: 20, sub: 0, crit: 0 });
+  closeTo(l2.mainTotal, 177.985 + 20, 1e-9, 'P2 WIS +20 joins main before the stat bonus');
+  closeTo(l2.finalAttack, 1341.8, 0.05, 'Laevatain P2 anchor');
+
+  const w0 = buildAttack(operators, weapons, { opId: 'chr_0006_wolfgd', opLv: 90 });
+  closeTo(w0.finalAttack, 1153.7, 0.05, 'Wulfgard base anchor');
+  const w1 = buildAttack(operators, weapons, { opId: 'chr_0006_wolfgd', opLv: 90, pot: 1 });
+  assert.deepEqual(w1.potGain, { main: 15, sub: 15, crit: 0 });
+  closeTo(w1.finalAttack, 1214.3, 0.05, 'Wulfgard P1 anchor');
+
+  const y0 = buildAttack(operators, weapons, { opId: 'chr_0017_yvonne', opLv: 90 });
+  const y2 = buildAttack(operators, weapons, { opId: 'chr_0017_yvonne', opLv: 90, pot: 2 });
+  closeTo(y2.critRate, y0.critRate + 7, 1e-6, 'Yvonne P2 CR +7%');
+  closeTo(y2.potGain.main, 20, 1e-9, 'Yvonne P2 main +20');
+});
+
+test('buildAttack: essence extraHit + atkPct (Lance 0010)', () => {
+  const e1 = buildAttack(operators, weapons, {
+    opId: 'chr_0016_laevat', opLv: 90, weaponId: 'wpn_lance_0010',
+    essRanks: { main: 1, sub: 0, skill: 1 },
+  });
+  closeTo(e1.extraHit, 1.2, 1e-9, 'extra-hit scale R1');
+  closeTo(e1.essAtkPct, 10, 1e-9, 'atkUp 0.1 -> +10% ATK');
+
+  const e9 = buildAttack(operators, weapons, {
+    opId: 'chr_0016_laevat', opLv: 90, weaponId: 'wpn_lance_0010',
+    essRanks: { main: 0, sub: 0, skill: 9 },
+  });
+  closeTo(e9.extraHit, 3.36, 1e-9, 'extra-hit scale R9');
+  closeTo(e9.essAtkPct, 28, 1e-9, 'atkUp 0.28 -> +28% ATK');
+});
+
+test('buildAttack: full Laevatain build (sheet-flat gear)', () => {
+  const b = buildAttack(operators, weapons, {
     opId: 'chr_0016_laevat',
     opLv: 90,
     weaponLv: 90,
-    potLv: 0,
     flatAtk: 128,
   });
   assert.ok(b);
   assert.equal(b.op.atk, 318);
   assert.equal(b.weaponId, 'wpn_sword_0003');
   assert.equal(b.weaponAtk, 283);
-  assert.equal(b.potentialAtk, 0);
   closeTo(b.finalAttack, 1554.718617, 0.002, 'FA from bundles');
 
-  const b2 = buildAttack(operators, weapons, traits, {
+  const b2 = buildAttack(operators, weapons, {
     opId: 'chr_0016_laevat',
     opLv: 90,
     weaponLv: 90,
-    potLv: 9,
     flatAtk: 128,
+    essRanks: { main: 0, sub: 0, skill: 9 },
   });
-  // potential ATK behaves like weapon ATK (inside the atk% zone, before the
-  // stat bonus multiply)
+  // essence skill R9 atkUp (33.6) behaves like weapon ATK (inside the atk%
+  // zone, before the stat bonus multiply)
   const expected = ((318 + 283 + 33.6) + 128) * statBonusMultiplier(177.985, 121.374);
   closeTo(b2.finalAttack, expected, 1e-6);
 });
@@ -208,11 +272,10 @@ test('anomaly multipliers follow the reference table', () => {
 // ------------------------------------------------------------- sheet parity
 
 test('sheet cross-check: Battle Skill row 17,206.8 reproduced', () => {
-  const b = buildAttack(operators, weapons, traits, {
+  const b = buildAttack(operators, weapons, {
     opId: 'chr_0016_laevat',
     opLv: 90,
     weaponLv: 90,
-    potLv: 0,
     flatAtk: 128,
   });
   const r = calcHit({
@@ -240,6 +303,29 @@ test('skill scale sums (Laevatain, skill level 12, current dump)', () => {
   closeTo(sum('chr_0016_laevat_combo_skill'), 5.4, 0.0005, 'combo');
   closeTo(sum('chr_0016_laevat_ultimate_skill'), 6.08, 0.0005, 'ultimate');
   closeTo(sum('chr_0016_laevat_power_attack'), 9.0, 0.0005, 'heavy');
+});
+
+test('operatorSkills: per-tree level map (missing trees default to 12)', () => {
+  const all12 = operatorSkills(skills, 'chr_0016_laevat', 12);
+  // every Laevatain damage skill must belong to one of the three in-game trees
+  for (const s of all12) assert.ok(['basic', 'skill', 'ult'].includes(s.tree), s.id + ' has no tree');
+  const mixed = operatorSkills(skills, 'chr_0016_laevat', { ult: 1 });
+  assert.equal(mixed.length, all12.length, 'same skill list');
+  const u1 = mixed.find((s) => s.id === 'chr_0016_laevat_ultimate_skill');
+  const u12 = all12.find((s) => s.id === 'chr_0016_laevat_ultimate_skill');
+  closeTo(u1.scales.reduce((a, b) => a + b, 0), 2.7, 1e-9, 'ultimate tree at level 1');
+  assert.notDeepEqual(u1.scales, u12.scales, 'lowered tree differs from lv12');
+  // the ult follow-up hits ride on the same tree
+  const ua1 = mixed.find((s) => s.id === 'chr_0016_laevat_ult_attack1');
+  const ua12 = all12.find((s) => s.id === 'chr_0016_laevat_ult_attack1');
+  assert.notDeepEqual(ua1.scales, ua12.scales, 'ult follow-up hit follows the ult tree');
+  // unlisted trees stay at level 12
+  const n12 = all12.find((s) => s.id === 'chr_0016_laevat_normal_skill');
+  const nM = mixed.find((s) => s.id === 'chr_0016_laevat_normal_skill');
+  assert.deepEqual(nM.scales, n12.scales, 'skill tree stays at level 12');
+  const p12 = all12.find((s) => s.id === 'chr_0016_laevat_power_attack');
+  const pM = mixed.find((s) => s.id === 'chr_0016_laevat_power_attack');
+  assert.deepEqual(pM.scales, p12.scales, 'basic tree stays at level 12');
 });
 
 // ------------------------------------------------------------- sequences
@@ -298,6 +384,31 @@ test('gearContribution: enhance level changes stats (stage 0 vs 3)', () => {
   closeTo(b.main[42], 84, 1e-9, 'stage 3 Will');
 });
 
+test('gearContribution: per-affix enhancement map (en as {affixKey: stage})', () => {
+  // item stages: Str(39) 43/47/51/55, Will(42) 65/71/78/84
+  const it = 'item_equip_t4_suit_atb01_hand_02';
+
+  // one affix maxed, the other untouched — the in-game choice
+  const mixed = gearContribution(equipment, { hand: { id: it, en: { 39: 3, 42: 0 } } }, 'Fire');
+  closeTo(mixed.main[39], 55, 1e-9, 'Str at stage 3');
+  closeTo(mixed.main[42], 65, 1e-9, 'Will at stage 0 (missing map key -> 0)');
+
+  // empty map = nothing enhanced (the UI default right after picking a piece)
+  const none = gearContribution(equipment, { hand: { id: it, en: {} } }, 'Fire');
+  closeTo(none.main[39], 43, 1e-9, 'empty map Str stage 0');
+  closeTo(none.main[42], 65, 1e-9, 'empty map Will stage 0');
+
+  // partial map: only Will enhanced
+  const willOnly = gearContribution(equipment, { hand: { id: it, en: { 42: 2 } } }, 'Fire');
+  closeTo(willOnly.main[42], 78, 1e-9, 'Will at stage 2');
+  closeTo(willOnly.main[39], 43, 1e-9, 'Str stays stage 0');
+
+  // numeric en stays uniform (legacy/tests compatibility)
+  const uni = gearContribution(equipment, { hand: { id: it, en: 3 } }, 'Fire');
+  closeTo(uni.main[39], 55, 1e-9, 'uniform stage 3 Str');
+  closeTo(uni.main[42], 84, 1e-9, 'uniform stage 3 Will');
+});
+
 test('gearContribution: taken scalars multiply; crit rate and elemental apply', () => {
   const taken = gearContribution(equipment, { body: { id: 'item_equip_t1_suit_stragi01_body_01', en: 0 } }, 'Physical');
   closeTo(taken.takenMult, Math.pow(0.961, 6), 1e-9, 'six 0.961 scalars');
@@ -328,7 +439,7 @@ test('gearContribution: Main/Sub attribute affixes (attrType-0 pseudo-keys)', ()
 
 test('buildAttack: Main/Sub affixes fold into the stat bonus (Laevatain)', () => {
   // Laevatain L90: main WIS 177.985, sub STR 121.374
-  const b = buildAttack(operators, weapons, traits, {
+  const b = buildAttack(operators, weapons, {
     opId: 'chr_0016_laevat', opLv: 90, weaponLv: 90,
     gear: gearContribution(equipment, {
       d1: { id: 'item_equip_t4_parts_wuling00_edc_05', en: 0 }, // Main 27, Sub 18
@@ -340,7 +451,7 @@ test('buildAttack: Main/Sub affixes fold into the stat bonus (Laevatain)', () =>
   closeTo(b.statBonus, bonus, 1e-6, 'stat bonus from new totals');
 
   // fraction multiplies AFTER flat points are added
-  const f = buildAttack(operators, weapons, traits, {
+  const f = buildAttack(operators, weapons, {
     opId: 'chr_0016_laevat', opLv: 90, weaponLv: 90,
     gear: gearContribution(equipment, {
       d1: { id: 'item_equip_t4_parts_wuling00_edc_05', en: 0 }, // Main 27 flat
@@ -369,11 +480,10 @@ test('gearContribution: set passive activates at 3 pieces of the same suit', () 
 });
 
 test('buildAttack with gear: Laevatain (flat+%, main stats, CR, set)', () => {
-  const b = buildAttack(operators, weapons, traits, {
+  const b = buildAttack(operators, weapons, {
     opId: 'chr_0016_laevat',
     opLv: 90,
     weaponLv: 90,
-    potLv: 0,
     gear: gearContribution(equipment, {
       body: { id: 'item_equip_t1_parts_tundra01_body_03', en: 0 }, // flat 11.717, Str 37, Wis 25
       hand: { id: 'item_equip_t4_suit_atb01_hand_02', en: 0 },     // Str 43, Will 65
@@ -397,7 +507,7 @@ test('buildAttack with gear: Laevatain (flat+%, main stats, CR, set)', () => {
 });
 
 test('buildAttack: 3pc Frontiers set feeds suitPct.dmg', () => {
-  const b = buildAttack(operators, weapons, traits, {
+  const b = buildAttack(operators, weapons, {
     opId: 'chr_0016_laevat',
     opLv: 90,
     weaponLv: 90,

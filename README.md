@@ -16,8 +16,8 @@ A **truly free** (no signup, no subscription) damage calculator for
 - Operator + weapon + potential picker (weapon list filters by weapon type)
 - Gear picker: 4 slots (body / hand / 2 devices), per-slot enhance 0–3,
   suit detection with 2-pc / 4-pc passive bonuses
-- Target editor: enemy preset (in-game training dummy, real enemies),
-  level, elemental resistance, staggered toggle, extra damage bonus
+- Target editor: fully configurable mob (manual DEF), elemental resistance,
+  staggered toggle, extra damage bonus — no enemy presets
 - Per-skill damage table (min / avg / max, crit included) + DPS
 - **Team builder**: snapshot the current build as a team member, define
   each member's skill cast sequence, combined total damage and

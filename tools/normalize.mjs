@@ -40,7 +40,6 @@ const professionTable = load('CharProfessionTable.json');
 const wpnBasic = load('WeaponBasicTable.json');
 const wpnCurves = load('WeaponUpgradeTemplateTable.json');
 const skillPatch = load('SkillPatchTable.json');
-const enemyTable = load('EnemyAttributeTemplateTable.json');
 
 // ------------------------------------------------------- attribute names
 const attrNames = {};
@@ -77,7 +76,10 @@ for (const code of [0, 1, 2, 3, 9, 10, 39, 40, 41, 42]) {
 }
 
 // ------------------------------------------------------- weapon type names
-const wpnPrefixNames = { sword: 'Sword', lance: 'Lance', claym: 'Claymore', pistol: 'Pistol', funnel: 'Funnel' };
+// "claym" is the EN "Greatsword" (confirmed in I18nTextTable_EN: the only
+// weapon-type label among sword/lance/claym/pistol/funnel besides "Funnel");
+// "funnel" has no EN type label in-game, keep the raw prefix.
+const wpnPrefixNames = { sword: 'Sword', lance: 'Lance', claym: 'Greatsword', pistol: 'Pistol', funnel: 'Funnel' };
 const wpnTypeByCode = {};
 for (const [id, w] of Object.entries(wpnBasic)) {
   const nm = wpnPrefixNames[id.split('_')[1]];
@@ -88,6 +90,144 @@ const wpnTypeName = (code) => wpnTypeByCode[code] || `Type ${code}`;
 // ------------------------------------------------------- professions
 const professions = {};
 for (const [k, v] of Object.entries(professionTable)) professions[v.profession] = T(v.name) || `Profession ${v.profession}`;
+
+// ------------------------------------------------------- operator potential
+// CharacterPotentialTable: each operator -> a 5-tier unlock bundle. Each tier's
+// effect row (PotentialTalentEffectTable.dataList) may carry:
+//   - attribute modifiers: 39–42 (Str/Agi/Wis/Will flats; P2-style rows grant
+//     all four, but only the operator's main/sub attributes affect damage —
+//     the engine buckets by attr code) and 9 (crit rate fraction) — these are
+//     folded into the model
+//   - per-skill tweaks, buffs, other attribute types — described via the
+//     effect row's i18n text so nothing is silently dropped
+const POTENTIAL_FLAT_ATTRS = new Set([39, 40, 41, 42]);
+// strip the dump's rich-text markup: <@ba.x>…</> / <#ba.x> tags;
+// {value} placeholders (game injects numbers at runtime) become a visible {n}
+const stripMarkup = (t) => String(t || '').replace(/<[^>]*>/g, '').replace(/\{[^}]*\}/g, '{n}').trim();
+const potentialTable = load('CharacterPotentialTable.json'); // keyed by operator id
+const potentialFx = new Map(Object.entries(load('PotentialTalentEffectTable.json'))); // keyed by effect id
+function operatorPotential(opId) {
+  const row = potentialTable[opId];
+  if (!row) { note(`${opId}: missing from CharacterPotentialTable`); return null; }
+  const bundle = (row.potentialUnlockBundle ?? []).slice().sort((a, b) => a.level - b.level);
+  const tiers = bundle.map((e) => {
+    const fx = e.potentialEffectId ? potentialFx.get(e.potentialEffectId) : undefined;
+    if (!fx) {
+      note(`${opId} P${e.level}: effect ${e.potentialEffectId} not found`);
+      return { attrs: [], info: [] };
+    }
+    const attrs = [];
+    for (const d of fx.dataList ?? []) {
+      const m = d.attrModifier;
+      if (!m) continue;
+      if (m.attrType === 9) attrs.push({ cr: r3(m.attrValue) });
+      else if (POTENTIAL_FLAT_ATTRS.has(m.attrType)) attrs.push({ attr: m.attrType, flat: r3(m.attrValue) });
+    }
+    const info = stripMarkup(fx.desc?.text || T(fx.desc));
+    return { attrs, info: info ? [info] : [] };
+  });
+  while (tiers.length < 5) tiers.push({ attrs: [], info: [] });
+  return tiers;
+}
+
+// ------------------------------------------------------- weapon essence (gems)
+// Slot roles from WeaponBasicTable.weaponSkillList prefixes:
+//   wpn_attr_*    = main-stat gem (mainattr / raw Str|Agi|Wis|Will flats)
+//   wpn_sp_attr_* = sub-stat gem (ATK %, crit rate, elemental/Arts DMG %)
+//   sk_wpn_*      = weapon-skill gem (the weapon passive)
+// Ranks R1–R9 are levels 1–9 of the gem's own SkillPatchTable bundle — the
+// bundle stores absolute per-rank values, so rank N is the level-N row.
+// Rank entry keys: main (wielder-main-attr flat), attr39..42 (raw attr flats,
+// engine buckets by main/sub code), atkPct / cr / cridmg / dmgBonus (summed
+// fractions), atkUp (<=1 ATK% fraction, >1 flat ATK — branched in engine),
+// extraHit (extra-hit scale), elem* / primaryUp / secondUp / allUp (summed
+// % fractions), rest (unmapped / conditional keys — info only).
+const gemNameOf = (g) => {
+  const entry = (skillPatch[g]?.SkillPatchDataBundle ?? [])[0];
+  return entry ? T(entry.skillName) || g : g;
+};
+const GEM_ELEM_KEY = { phy: 'elemPhy', fire: 'elemFire', pulse: 'elemPulse', cryst: 'elemCryst', nature: 'elemNature' };
+// Sub-stat gems spell the element out in full (no underscore):
+// phydam / firedam / electrondam / crystdam / naturaldam
+const GEM_ELEM_FULL = { phydam: 'elemPhy', firedam: 'elemFire', electrondam: 'elemPulse', crystdam: 'elemCryst', naturaldam: 'elemNature' };
+
+// L1 gate: a gem's blackboard mixes always-on effects with conditional
+// (team/buff) effects. A bb key is always-on iff its {key} placeholder
+// appears on the FIRST line of the gem's level-1 description (resolved via
+// i18n, markup stripped). Validated across all 128 essence gems — every other
+// key is surfaced as info only (its text rides along in `lines`).
+const gemL1 = (g) => {
+  const bundle = skillPatch[g]?.SkillPatchDataBundle ?? [];
+  const entry = bundle.find((p) => p.level === 1) ?? bundle[0];
+  if (!entry) return { lines: [], fold: new Set() };
+  // extract the L1 placeholder set from tag-stripped text BEFORE stripMarkup
+  // rewrites {key:..} into the display-safe {n}
+  const rawLines = String(T(entry.description) || '').replace(/<[^>]*>/g, '')
+    .split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const fold = new Set();
+  for (const m of (rawLines[0] || '').matchAll(/\{([a-zA-Z0-9_ ]+?)(?::|})/g)) fold.add(m[1].trim());
+  return { lines: rawLines.map(stripMarkup), fold };
+};
+
+const notedUnmapped = new Set();
+function mapGemRank(bb, fold, g) {
+  const mapped = {};
+  const rest = [];
+  for (const [k, v] of Object.entries(bb)) {
+    // atk_scale is exempt from the L1 gate: it exists in exactly one gem
+    // (sk_wpn_lance_0010) whose placeholder sits on line 2, but the extra hit
+    // is the skill's base effect, always on.
+    if (k === 'atk_scale') { mapped.extraHit = v; continue; }
+    if (!fold.has(k)) { rest.push(k); continue; }
+    if (k === 'mainattr') mapped.main = v; // wielder's main attribute, flat
+    else if (k === 'str') mapped.attr39 = v;
+    else if (k === 'agi') mapped.attr40 = v;
+    else if (k === 'wisd') mapped.attr41 = v;
+    else if (k === 'will') mapped.attr42 = v;
+    else if (['atk', 'atk_up1', 'atk_up2', 'atk_up_add', 'atk_up_mult'].includes(k)) mapped.atkPct = r3((mapped.atkPct ?? 0) + v);
+    else if (['crirate', 'crit_up', 'crit_up2'].includes(k)) mapped.cr = r3((mapped.cr ?? 0) + v);
+    else if (k === 'cridmg') mapped.cridmg = v;
+    else if (k === 'atk_up') mapped.atkUp = v; // <=1 = ATK % fraction, >1 = flat ATK (branched in the engine)
+    else if (k === 'spelldam' || k === 'dmg_up' || k === 'dmg_up2' || k.startsWith('spell_dmg_up')) mapped.dmgBonus = r3((mapped.dmgBonus ?? 0) + v);
+    else if (GEM_ELEM_FULL[k]) mapped[GEM_ELEM_FULL[k]] = r3((mapped[GEM_ELEM_FULL[k]] ?? 0) + v);
+    else {
+      const ek = GEM_ELEM_KEY[String(k).split('_')[0]];
+      if (ek && /dam|dmg/.test(k)) mapped[ek] = r3((mapped[ek] ?? 0) + v);
+      else if (k === 'primary_attr_up') mapped.primaryUp = r3((mapped.primaryUp ?? 0) + v);
+      else if (k === 'second_attr_up') mapped.secondUp = r3((mapped.secondUp ?? 0) + v);
+      else if (k === 'all_attr_up' || k === 'all_attr_up2') mapped.allUp = r3((mapped.allUp ?? 0) + v);
+      else if (!notedUnmapped.has(`${g}:${k}`)) {
+        rest.push(k);
+        notedUnmapped.add(`${g}:${k}`);
+        note(`essence ${g}: L1 key "${k}" has no mapping — treated as info`);
+      } else rest.push(k);
+    }
+  }
+  return rest.length ? { ...mapped, rest } : mapped;
+}
+
+function essenceSlots(w) {
+  const slots = [];
+  for (const g of w.weaponSkillList ?? []) {
+    const role = g.startsWith('wpn_attr_') ? 'main' : g.startsWith('wpn_sp_attr_') ? 'sub' : g.startsWith('sk_wpn_') ? 'skill' : null;
+    if (!role) { note(`weapon ${w.id}: unrecognized essence slot "${g}"`); continue; }
+    const { lines, fold } = gemL1(g);
+    const ranks = [];
+    for (let r = 1; r <= 9; r++) {
+      const entry = (skillPatch[g]?.SkillPatchDataBundle ?? []).find((p) => p.level === r);
+      if (!entry) note(`essence ${g}: rank ${r} missing from SkillPatchTable`);
+      const bb = {};
+      for (const { key, value } of entry?.blackboard ?? []) {
+        const k = String(key).trim(); // one bundle ships a trailing-space key ("cd ")
+        if (k === 'lv') continue; // level echo, not a bonus
+        bb[k] = r3(value);
+      }
+      ranks.push(mapGemRank(bb, fold, g));
+    }
+    slots.push({ id: g, role, name: gemNameOf(g), lines, ranks });
+  }
+  return slots;
+}
 
 // ------------------------------------------------------- operators
 const SLOT_CODES = [1, 2, 3, 9, 10, 39, 40, 41, 42]; // hp, atk, def, critRate, critDmg, str, agi, wis, wil
@@ -126,6 +266,7 @@ for (const [id, op] of Object.entries(charTable)) {
     poiseFactor: r3(op.resilienceDeductionFactor ?? 0),
     maxLevel: Math.max(...[...byLevel.keys()]),
     levels,
+    potential: operatorPotential(id),
   });
 }
 // sanity: Laevatain L90 base ATK
@@ -133,6 +274,22 @@ const laev = operators.find((o) => o.id === 'chr_0016_laevat');
 if (laev) fact(`Laevatain L90: HP=${laev.levels[89].a[0]} ATK=${laev.levels[89].a[1]} crit=${laev.levels[89].a[3]} wis=${laev.levels[89].a[7]}`);
 
 // ------------------------------------------------------- weapons
+// Weapon origin (probed from the dump, the three sets do not overlap):
+//   bp  — battle-pass weapons: item_wpnpotentialup_bp.weaponIds
+//         (WeaponPotentialUpItemTable)
+//   sig — signature (paid gacha) weapons: reward_payshop_wpn_<type>_<nnnn>
+//         reward ids referenced from GachaWeaponPoolTable rows
+//   std — everything else
+const wpnPotTable = load('WeaponPotentialUpItemTable.json');
+const gwpTable = load('GachaWeaponPoolTable.json');
+const bpWeapons = new Set(Object.values(wpnPotTable).flatMap((v) => v.weaponIds ?? []));
+const sigWeapons = new Set();
+for (const v of Object.values(gwpTable)) {
+  for (const m of JSON.stringify(v).matchAll(/reward_payshop_wpn_([a-z]+)_(\d{4})/g)) {
+    sigWeapons.add(`wpn_${m[1]}_${m[2]}`);
+  }
+}
+const originOf = (id) => (bpWeapons.has(id) ? 'bp' : sigWeapons.has(id) ? 'sig' : 'std');
 const curveIds = new Set();
 const weapons = [];
 for (const [id, w] of Object.entries(wpnBasic)) {
@@ -144,10 +301,12 @@ for (const [id, w] of Object.entries(wpnBasic)) {
     rarity: w.rarity ?? 0,
     type: w.weaponType,
     typeName: wpnTypeName(w.weaponType),
+    origin: originOf(id),
     maxLv: w.maxLv ?? 90,
     curve: w.levelTemplateId,
     potentialSkill: w.weaponPotentialSkill || '',
     traits: (w.weaponSkillList ?? []).filter((t) => t !== w.weaponPotentialSkill),
+    essence: essenceSlots(w),
   });
 }
 const curves = {};
@@ -161,6 +320,7 @@ if (tarr && laev) {
   const wAtk = curves[tarr.curve]?.[89]?.[1];
   fact(`Tarr 11 L90 weapon ATK=${wAtk}; Laevatain+Tarr11 total base ATK=${laev.levels[89].a[1] + (wAtk ?? '?')}`);
 }
+fact(`weapon origins: bp=${weapons.filter((w) => w.origin === 'bp').length} sig=${weapons.filter((w) => w.origin === 'sig').length} std=${weapons.filter((w) => w.origin === 'std').length}`);
 
 // ------------------------------------------------------- weapon traits (passives + potential skills)
 const traitDefs = {};
@@ -248,6 +408,30 @@ function classifySkill(sid) {
   if (/^reaction/.test(tail)) return { kind: 'Reaction', hit: '' };
   return { kind: tail.replace(/_/g, ' '), hit: '', unknown: true };
 }
+// In-game, each operator has exactly THREE levelable skill trees — Basic
+// Attack, Battle Skill (includes the combo/follow-up skills) and Ultimate.
+// Every other skill row (dash/plunge/heavy hits, during-ult variants, ult
+// follow-up hits) rides on one of those trees. The grouping is read from the
+// level-1 icon (icon_attack_* / icon_skill_* / icon_combo_skill_* /
+// icon_ultimate_skill_*) disambiguated by the id tail: "ult_attack*" rows
+// wear the generic attack icon but belong to the Ultimate tree, while
+// "attackN_ult" (basics performed during the ult) are Basic tree.
+function iconPrefix(ic) {
+  if (ic.startsWith('icon_ultimate_skill')) return 'ultimate';
+  if (ic.startsWith('icon_combo_skill')) return 'combo';
+  if (ic.startsWith('icon_skill_')) return 'skill';
+  if (ic.startsWith('icon_attack_')) return 'attack';
+  return 'other';
+}
+function skillTree(prefix, tail) {
+  if (prefix === 'ultimate') return 'ult';
+  if (/^ult(_|$)/.test(tail)) return 'ult'; // ult_attackN(_N)?, ult_attack_end
+  if (prefix === 'skill' || prefix === 'combo') return 'skill';
+  if (prefix === 'attack') return 'basic';
+  // anomalous icon -> infer from the tail
+  if (/skill/.test(tail)) return 'skill';
+  return 'basic';
+}
 // Any blackboard key starting with "atk_scale" (except display mirrors) is a
 // damage scale = multiplier of FinalAttack. Order hits: bare "atk_scale" is
 // the primary (0), "atk_scale_N" -> N, named variants (pull/explosion/base/
@@ -266,6 +450,11 @@ for (const [sid, s] of Object.entries(skillPatch)) {
   const c = classifySkill(sid);
   if (c.unknown) note(`unrecognized skill tail: ${sid}`);
   const opId = sid.split('_').slice(0, 3).join('_');
+  const ic = (s.SkillPatchDataBundle?.[0]?.iconId) || '';
+  const ip = iconPrefix(ic);
+  if (ip === 'other') note(`${sid}: unusual icon "${ic}"`);
+  const tail = sid.replace(/^chr_\d+_[a-z]+_/, '');
+  const tree = skillTree(ip, tail);
   const levels = [];
   let hasScales = false;
   for (const e of s.SkillPatchDataBundle ?? []) {
@@ -291,9 +480,9 @@ for (const [sid, s] of Object.entries(skillPatch)) {
     });
   }
   if (!hasScales && !c.passive) note(`skill without atk_scale: ${sid}`);
-  skillList.push({ id: sid, op: opId, kind: c.kind, hit: c.hit || '', passive: !!c.passive, damage: hasScales, levels });
+  skillList.push({ id: sid, op: opId, kind: c.kind, hit: c.hit || '', tree, passive: !!c.passive, damage: hasScales, levels });
 }
-fact(`skills total=${skillList.length}; damage skills=${skillList.filter((s) => s.damage).length}`);
+fact(`skills total=${skillList.length}; damage skills=${skillList.filter((s) => s.damage).length}; trees basic=${skillList.filter((s) => s.tree === 'basic').length} skill=${skillList.filter((s) => s.tree === 'skill').length} ult=${skillList.filter((s) => s.tree === 'ult').length}`);
 
 // ------------------------------------------------------- equipment (armor)
 // EquipTable: 276 pieces, ids item_equip_t{0-4}_{parts|suit}_{set}_{body|hand|edc}_{n}.
@@ -387,38 +576,6 @@ const atb = Object.values(equipItems).find((x) => x.id === 'item_equip_t4_suit_a
   equipItems['item_equip_t4_suit_atb01_hand_02'];
 if (atb) fact(`sample gear ${atb.name}: stage1 = ${JSON.stringify(atb.st[1])}`);
 
-// ------------------------------------------------------- enemies (target presets)
-// Per-level DEF from levelDependentAttributes + uniform elemental resistance at
-// top level. Base ids match /^eny_\d+_[a-z]+$/ ; suffixed ids are dungeon/elite
-// variants. `eny_0018_lbtough` is the in-game training dummy.
-const dummyId = 'eny_0018_lbtough';
-const enemies = [];
-for (const [id, e] of Object.entries(enemyTable)) {
-  const byLevel = new Map();
-  for (const row of e.levelDependentAttributes ?? []) {
-    const lvl = Math.round(row.attrs?.find((a) => a.attrType === 0)?.attrValue ?? 0);
-    if (!lvl) continue;
-    byLevel.set(lvl, row.attrs?.find((a) => a.attrType === 3)?.attrValue ?? 0);
-  }
-  if (!byLevel.size) continue;
-  const lvls = [...byLevel.keys()].sort((a, b) => a - b);
-  const res = r3(Math.max(
-    e.physicalResistance ?? 0, e.fireResistance ?? 0,
-    e.pulseResistance ?? 0, e.crystResistance ?? 0, e.naturalResistance ?? 0,
-  ));
-  enemies.push({
-    id,
-    name: id.replace(/^eny_\d+/, '').replace(/_/g, ' ').trim(),
-    base: /^eny_\d+_[a-z]+$/.test(id),
-    dummy: id === dummyId,
-    levels: lvls.map((l) => ({ lv: l, def: byLevel.get(l) })),
-    res,
-  });
-}
-enemies.sort((a, b) => (b.dummy - a.dummy) || (b.base - a.base) || a.name.localeCompare(b.name));
-const dummy = enemies.find((x) => x.dummy);
-if (dummy) fact(`dummy ${dummy.id}: L20 DEF=${dummy.levels.find((l) => l.lv === 20)?.def ?? '?'} res=${dummy.res}%`);
-
 // ------------------------------------------------------- meta
 // Commit of the upstream dump: prefer the marker file written by
 // tools/fetchData.mjs (raw-file snapshot), fall back to a git checkout.
@@ -442,7 +599,6 @@ const bundles = {
     operators: operators.length,
     weapons: weapons.length,
     skills: skillList.length,
-    enemies: enemies.length,
     equipment: Object.keys(equipItems).length,
     suits: Object.keys(suits).length,
   },
@@ -452,7 +608,6 @@ const bundles = {
   'attrnames.json': attrNames,
   'traits.json': { traitDefs, potentialSkills },
   'equipment.json': { items: equipItems, suits, affixNames },
-  'enemies.json': enemies,
   'diagnostics.json': { warnings: diag.warnings.slice(0, 200), facts: diag.facts.slice(0, 200), warningCount: diag.warnings.length },
 };
 for (const [name, obj] of Object.entries(bundles)) {
